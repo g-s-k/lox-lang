@@ -12,11 +12,11 @@ default-run = "loxi"
 default = []
 
 # log messages during compilation
-verbose-compilation = ["log"]
+trace-compilation = ["log"]
 # log debug traces of each instruction at runtime
-verbose-runtime = ["log"]
+trace-execution = ["log"]
 # log garbage collection activity
-verbose-gc = ["log"]
+trace-gc = ["log"]
 # run garbage collector on every allocation
 stress-test-gc = []
 
