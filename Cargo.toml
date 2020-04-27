@@ -21,4 +21,5 @@ trace-gc = ["log"]
 stress-test-gc = []
 
 [dependencies]
+clap = { git = "https://github.com/clap-rs/clap/" }
 log = { version = "0.4", optional = true }

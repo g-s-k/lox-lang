@@ -1,5 +1,15 @@
 use std::fmt;
 
+mod compiler;
+mod scanner;
+mod token;
+
+use {
+    compiler::Compiler,
+    scanner::Scanner,
+    token::{Token, TokenType},
+};
+
 pub struct VM {
     stack: Vec<Value>,
 }
@@ -11,7 +21,9 @@ impl Default for VM {
 }
 
 impl VM {
-    pub fn interpret(&mut self, chunk: Chunk) -> Result<(), Error> {
+    pub fn interpret(&mut self, source: String) -> Result<(), Error> {
+        let mut compiler = Compiler::new(&source);
+        let chunk = compiler.compile()?;
         self.run(chunk)
     }
 
@@ -78,9 +90,22 @@ impl VM {
     }
 }
 
+pub enum ErrorCategory {
+    Compilation,
+    Runtime,
+}
+
 #[derive(Debug)]
 pub enum Error {
     StackEmpty,
+}
+
+impl Error {
+    pub fn category(&self) -> ErrorCategory {
+        match self {
+            Self::StackEmpty => ErrorCategory::Runtime,
+        }
+    }
 }
 
 impl fmt::Display for Error {
