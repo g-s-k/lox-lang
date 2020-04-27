@@ -1,0 +1,24 @@
+[package]
+name = "lox-lang"
+version = "0.0.1"
+authors = ["George Kaplan <george@georgekaplan.xyz>"]
+edition = "2018"
+license = "MIT"
+keywords = ["interpreter", "lox", "compiler", "embeddable", "script"]
+categories = ["parser-implementations", "command-line-utilities"]
+default-run = "loxi"
+
+[features]
+default = []
+
+# log messages during compilation
+verbose-compilation = ["log"]
+# log debug traces of each instruction at runtime
+verbose-runtime = ["log"]
+# log garbage collection activity
+verbose-gc = ["log"]
+# run garbage collector on every allocation
+stress-test-gc = []
+
+[dependencies]
+log = { version = "0.4", optional = true }
