@@ -164,13 +164,18 @@ impl<'a> Scanner<'a> {
         while let Some((_, c)) = self.current {
             match c {
                 '\n' => self.line += 1,
-                '"' => break,
+                '"' => {
+                    self.next();
+                    break;
+                }
                 _ => (),
             }
 
             if self.next.is_none() {
                 return Err((self.line, Error::UnterminatedString));
             }
+
+            self.next();
         }
 
         Ok(())

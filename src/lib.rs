@@ -1,4 +1,7 @@
-use std::fmt;
+use std::{
+    cmp, fmt,
+    rc::{Rc, Weak},
+};
 
 mod chunk;
 mod compiler;
@@ -17,17 +20,21 @@ use {
 
 pub struct VM {
     stack: Vec<Value>,
+    heap: Option<Rc<Object>>,
 }
 
 impl Default for VM {
     fn default() -> Self {
-        Self { stack: Vec::new() }
+        Self {
+            stack: Vec::new(),
+            heap: None,
+        }
     }
 }
 
 impl VM {
     pub fn interpret<T: AsRef<str>>(&mut self, source: T) -> Result<(), Error> {
-        match Compiler::new(source.as_ref()).compile() {
+        match Compiler::new(source.as_ref(), self).compile() {
             Ok(chunk) => {
                 #[cfg(feature = "trace-compilation")]
                 println!("{}", chunk);
@@ -62,7 +69,7 @@ impl VM {
                 // should be infallible now
                 if let (Value::Number(b), Value::Number(a)) =
                     (self.pop()?, self.pop()?) {
-                self.stack.push(Value::$variant(a $op b));
+                    self.stack.push(Value::$variant(a $op b));
                 }
             }};
         }
@@ -101,7 +108,33 @@ impl VM {
                 }
                 Greater => binary_op!(>, Boolean),
                 Less => binary_op!(<, Boolean),
-                Add => binary_op!(+, Number),
+                Add => {
+                    match (self.peek(1)?, self.peek(0)?) {
+                        (Value::Number(_), Value::Number(_)) => {
+                            if let (Value::Number(b), Value::Number(a)) = (self.pop()?, self.pop()?)
+                            {
+                                self.stack.push(Value::Number(b + a));
+                                continue;
+                            }
+                        }
+                        (Value::Object(obj_a), Value::Object(obj_b)) => {
+                            if let (Some(ref_a), Some(ref_b)) = (obj_a.upgrade(), obj_b.upgrade()) {
+                                if let (ObjectData::r#String(a), ObjectData::r#String(b)) =
+                                    (&ref_a.data, &ref_b.data)
+                                {
+                                    self.pop()?;
+                                    self.pop()?;
+                                    let new_str = ObjectData::r#String(a.to_string() + b);
+                                    let alloc_obj = self.alloc(new_str);
+                                    self.stack.push(Value::Object(alloc_obj));
+                                    continue;
+                                }
+                            }
+                        }
+                        _ => (),
+                    }
+                    return Err(Error::ArgumentTypes);
+                }
                 Subtract => binary_op!(-, Number),
                 Multiply => binary_op!(*, Number),
                 Divide => binary_op!(/, Number),
@@ -128,17 +161,34 @@ impl VM {
     }
 
     fn peek(&self, distance: usize) -> Result<&Value, Error> {
+        if self.stack.len() < distance + 1 {
+            return Err(Error::StackEmpty);
+        }
+
         self.stack
             .get(self.stack.len() - 1 - distance)
             .ok_or(Error::StackEmpty)
     }
+
+    fn alloc(&mut self, data: ObjectData) -> Weak<Object> {
+        let owner = Rc::new(Object {
+            next: self.heap.take(),
+            data,
+        });
+
+        let weak_ref = Rc::downgrade(&owner);
+        self.heap.replace(owner);
+
+        weak_ref
+    }
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 pub enum Value {
     Nil,
     Boolean(bool),
     Number(f64),
+    Object(Weak<Object>),
 }
 
 impl fmt::Display for Value {
@@ -147,6 +197,19 @@ impl fmt::Display for Value {
             Self::Nil => write!(f, "nil"),
             Self::Boolean(b) => write!(f, "{}", b),
             Self::Number(v) => write!(f, "{}", v),
+            Self::Object(obj) => write!(f, "{}", obj.upgrade().expect(Self::UPGRADE_PANIC)),
+        }
+    }
+}
+
+impl cmp::PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Nil, Self::Nil) => true,
+            (Self::Boolean(a), Self::Boolean(b)) => a == b,
+            (Self::Number(a), Self::Number(b)) => a == b,
+            (Self::Object(a), Self::Object(b)) => Weak::ptr_eq(a, b) || a.upgrade() == b.upgrade(),
+            _ => false,
         }
     }
 }
@@ -154,6 +217,9 @@ impl fmt::Display for Value {
 type OpResult = Result<Value, Error>;
 
 impl Value {
+    const UPGRADE_PANIC: &'static str =
+        "CRITICAL: Failed to obtain reference to garbage collected object";
+
     fn is_falsey(&self) -> bool {
         match self {
             Self::Nil | Self::Boolean(false) => true,
@@ -170,8 +236,32 @@ impl Value {
     }
 }
 
+pub struct Object {
+    next: Option<Rc<Self>>,
+    data: ObjectData,
+}
+
+impl cmp::PartialEq for Object {
+    fn eq(&self, other: &Self) -> bool {
+        self.data == other.data
+    }
+}
+
+#[derive(PartialEq)]
+enum ObjectData {
+    r#String(String),
+}
+
+impl fmt::Display for Object {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match &self.data {
+            ObjectData::r#String(s) => write!(f, "{}", s),
+        }
+    }
+}
+
 #[derive(Clone)]
-pub enum Op {
+enum Op {
     Constant(u8),
     ConstantLong(u16),
     Nil,

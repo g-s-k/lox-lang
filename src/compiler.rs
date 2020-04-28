@@ -1,6 +1,6 @@
 use std::fmt;
 
-use super::{Chunk, Error, Op, ScanError, Scanner, Token, TokenType, Value};
+use super::{Chunk, Error, ObjectData, Op, ScanError, Scanner, Token, TokenType, Value, VM};
 
 type MaybeToken<'a> = Option<Result<Token<'a>, ScanError>>;
 
@@ -39,10 +39,11 @@ pub(crate) struct Compiler<'a> {
     errors: Vec<CompileError<'a>>,
     panic_mode: bool,
     chunk: Chunk,
+    vm: &'a mut VM,
 }
 
 impl<'a> Compiler<'a> {
-    pub fn new(source: &'a str) -> Self {
+    pub fn new(source: &'a str, vm: &'a mut VM) -> Self {
         Self {
             scanner: Scanner::new(source),
             parser: Parser {
@@ -53,6 +54,7 @@ impl<'a> Compiler<'a> {
             errors: Vec::new(),
             panic_mode: false,
             chunk: Chunk::new(""),
+            vm,
         }
     }
 
@@ -199,6 +201,15 @@ impl<'a> Compiler<'a> {
             _ => unreachable!(),
         }
     }
+
+    fn string(&mut self) {
+        if let Some(Ok(t)) = &self.parser.previous {
+            let text_without_quotes = t.text[1..t.text.len() - 1].to_string();
+            let ptr = self.vm.alloc(ObjectData::r#String(text_without_quotes));
+
+            emit!(self, const, Value::Object(ptr));
+        }
+    }
 }
 
 struct Parser<'a> {
@@ -256,7 +267,7 @@ fn get_rule<'a, 'b>(sigil: TokenType) -> Rule<'a, 'b> {
         Less => (None, Some(Compiler::binary), Precedence::Comparison),
         LessEqual => (None, Some(Compiler::binary), Precedence::Comparison),
         Identifier => (None, None, Precedence::None),
-        r#String => (None, None, Precedence::None),
+        r#String => (Some(Compiler::string), None, Precedence::None),
         Number => (Some(Compiler::number), None, Precedence::None),
         And => (None, None, Precedence::None),
         Class => (None, None, Precedence::None),
