@@ -1,31 +1,74 @@
 use std::fmt;
 
-use super::{Chunk, Error, ObjectData, Op, ScanError, Scanner, Token, TokenType, Value, VM};
+use super::{Chunk, Error, ErrorCategory, Op, ScanError, Scanner, Token, TokenType, Value};
 
 type MaybeToken<'a> = Option<Result<Token<'a>, ScanError>>;
 
-pub(crate) struct CompileError<'a> {
-    pub err: Error,
-    token: MaybeToken<'a>,
+#[derive(Debug)]
+pub(crate) struct CompileError {
+    pub err: CompileErrorType,
+    line: usize,
+    text: Option<String>,
 }
 
-impl<'a> fmt::Display for CompileError<'a> {
+impl Error for CompileError {
+    fn category(&self) -> ErrorCategory {
+        ErrorCategory::Compilation
+    }
+}
+
+impl fmt::Display for CompileError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match &self.token {
-            Some(Ok(token)) => write!(
-                f,
-                "[line {}] Error at {}: {}",
-                token.line, token.text, self.err
-            ),
-            Some(Err((line, e))) => write!(f, "[line {}] {}", line, e),
-            None => write!(f, "Error at end: {}", self.err),
+        write!(f, "[line {}] Error", self.line)?;
+        if let Some(t) = &self.text {
+            write!(f, " at \"{}\"", t)?;
+        }
+        write!(f, ": {}", self.err)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum CompileErrorType {
+    // compilation
+    UnexpectedChar,
+    UnterminatedString,
+    MissingRightParen,
+    MissingPrefixExpr,
+    MissingSemi,
+    MissingVarName,
+    ExpectedEOF,
+}
+
+impl fmt::Display for CompileErrorType {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        use CompileErrorType::*;
+
+        match self {
+            UnexpectedChar => write!(f, "unexpected character"),
+            UnterminatedString => write!(f, "unterminated string"),
+            MissingRightParen => write!(f, "expected ')'"),
+            MissingPrefixExpr => write!(f, "expected expression"),
+            MissingSemi => write!(f, "expected ';' after statement"),
+            MissingVarName => write!(f, "expect variable name"),
+            ExpectedEOF => write!(f, "expected end of input"),
         }
     }
 }
 
 macro_rules! emit {
-    ( $c:ident, const, $( $op:expr ),* ) => {{
-        $( $c.chunk.write_constant($op, $c.parser.line); )*
+    (const $c: ident : $short: ident / $long: ident, $val: expr ) => {{
+        let index = $c.chunk.add_constant($val);
+        $c.chunk.write(
+            if index < 256 {
+                Op::$short(index as u8)
+            } else {
+                Op::$long(index as u16)
+            },
+            $c.parser.line
+        );
+    }};
+    ( $c:ident, const, $( $val:expr ),* ) => {{
+        $( $c.chunk.write_constant($val, $c.parser.line); )*
     }};
 
     ( $c:ident, $( $op:expr ),* ) => {{
@@ -33,45 +76,46 @@ macro_rules! emit {
     }};
 }
 
-pub(crate) struct Compiler<'a> {
-    scanner: Scanner<'a>,
-    parser: Parser<'a>,
-    errors: Vec<CompileError<'a>>,
-    panic_mode: bool,
+pub(crate) struct Compiler<'compile> {
+    scanner: Scanner<'compile>,
+    parser: Parser<'compile>,
+    errors: Vec<CompileError>,
     chunk: Chunk,
-    vm: &'a mut VM,
 }
 
-impl<'a> Compiler<'a> {
-    pub fn new(source: &'a str, vm: &'a mut VM) -> Self {
-        Self {
+type ParseFn<'compile> = fn(&mut Compiler<'compile>);
+type Rule<'a> = (Option<ParseFn<'a>>, Option<ParseFn<'a>>, Precedence);
+
+impl<'compile> Compiler<'compile> {
+    pub fn compile(source: &'compile str) -> Result<Chunk, Vec<CompileError>> {
+        let mut compiler = Self {
             scanner: Scanner::new(source),
             parser: Parser {
                 current: None,
                 previous: None,
                 line: 1,
+                panic_mode: false,
             },
             errors: Vec::new(),
-            panic_mode: false,
             chunk: Chunk::new(""),
-            vm,
-        }
-    }
+        };
 
-    pub fn compile(mut self) -> Result<Chunk, Vec<CompileError<'a>>> {
-        self.advance();
-        self.expression();
+        compiler.advance();
 
-        if self.scanner.next().is_some() {
-            self.error_at_current(Error::ExpectedEOF);
+        while let Some(Ok(_)) = &compiler.parser.current {
+            compiler.declaration();
         }
 
-        emit!(self, Op::Return);
+        if compiler.scanner.next().is_some() {
+            compiler.error_at_current(CompileErrorType::ExpectedEOF);
+        }
 
-        if !self.errors.is_empty() {
-            Err(self.errors)
+        emit!(compiler, Op::Return);
+
+        if !compiler.errors.is_empty() {
+            Err(compiler.errors)
         } else {
-            Ok(self.chunk)
+            Ok(compiler.chunk)
         }
     }
 
@@ -91,7 +135,7 @@ impl<'a> Compiler<'a> {
         };
     }
 
-    fn consume(&mut self, r#type: TokenType, if_not: Error) {
+    fn consume(&mut self, r#type: TokenType, if_not: CompileErrorType) {
         if let Some(Ok(Token { r#type: t, .. })) = self.parser.current {
             if t == r#type {
                 self.advance();
@@ -102,34 +146,131 @@ impl<'a> Compiler<'a> {
         self.error_at_current(if_not);
     }
 
-    fn error(&mut self, err: Error) {
+    fn error(&mut self, err: CompileErrorType) {
         self.error_at(self.parser.previous.clone(), err);
     }
 
-    fn error_at_current(&mut self, err: Error) {
+    fn error_at_current(&mut self, err: CompileErrorType) {
         self.error_at(self.parser.current.clone(), err);
     }
 
-    fn error_at(&mut self, token: MaybeToken<'a>, err: Error) {
-        if !self.panic_mode {
-            self.panic_mode = true;
-            self.errors.push(CompileError { err, token });
+    fn error_at(&mut self, token: MaybeToken<'compile>, err: CompileErrorType) {
+        if !self.parser.panic_mode {
+            self.parser.panic_mode = true;
+            self.errors.push(CompileError {
+                err,
+                line: self.parser.line,
+                text: token
+                    .map(Result::unwrap)
+                    .map(|Token { text, .. }| text.to_string()),
+            });
+            log::error!("{}", err);
         }
+    }
+
+    fn synchronize(&mut self) {
+        self.parser.panic_mode = false;
+
+        while let Some(maybe_token) = &self.parser.current {
+            if let Some(TokenType::Semi) = self.parser.previous_type() {
+                return;
+            }
+
+            if let Ok(token) = maybe_token {
+                match token.r#type {
+                    TokenType::Class
+                    | TokenType::Fun
+                    | TokenType::Var
+                    | TokenType::For
+                    | TokenType::If
+                    | TokenType::While
+                    | TokenType::Print
+                    | TokenType::Return => return,
+                    _ => (),
+                }
+            }
+
+            self.advance();
+        }
+    }
+
+    fn declaration(&mut self) {
+        match self.parser.current_type() {
+            Some(TokenType::Var) => {
+                self.advance();
+                self.var_declaration();
+            }
+            _ => self.statement(),
+        }
+
+        if self.parser.panic_mode {
+            self.synchronize();
+        }
+    }
+
+    fn parse_variable(&mut self, err: CompileErrorType) -> usize {
+        self.consume(TokenType::Identifier, err);
+        if let Some(Ok(Token { text, .. })) = self.parser.previous {
+            self.chunk.add_constant(Value::r#String(text.to_string()))
+        } else {
+            unreachable!();
+        }
+    }
+
+    fn var_declaration(&mut self) {
+        let var_const = self.parse_variable(CompileErrorType::MissingVarName);
+
+        if let Some(TokenType::Equal) = self.parser.current_type() {
+            self.expression();
+        } else {
+            emit!(self, Op::Nil);
+        }
+
+        self.consume(TokenType::Semi, CompileErrorType::MissingSemi);
+
+        emit!(
+            self,
+            if var_const < 256 {
+                Op::DefineGlobal(var_const as u8)
+            } else {
+                Op::DefineGlobalLong(var_const as u16)
+            }
+        );
+    }
+
+    fn statement(&mut self) {
+        self.advance();
+        match self.parser.previous_type() {
+            Some(TokenType::Print) => self.print_statement(),
+            _ => self.expression_statement(),
+        }
+    }
+
+    fn print_statement(&mut self) {
+        self.expression();
+        self.consume(TokenType::Semi, CompileErrorType::MissingSemi);
+        emit!(self, Op::Print);
+    }
+
+    fn expression_statement(&mut self) {
+        self.expression();
+        self.consume(TokenType::Semi, CompileErrorType::MissingSemi);
+        emit!(self, Op::Pop);
     }
 
     fn parse_precedence(&mut self, precedence: Precedence) {
         self.advance();
         if let Some(operator) = self.parser.previous_type() {
-            if let (Some(prefix_func), _, _) = get_rule(operator) {
+            if let (Some(prefix_func), _, _) = Self::get_rule(operator) {
                 prefix_func(self);
             } else {
-                self.error(Error::MissingPrefixExpr);
+                self.error(CompileErrorType::MissingPrefixExpr);
                 return;
             }
         }
 
         while let Some(operator) = self.parser.current_type() {
-            let (_, maybe_infix, rule_precedence) = get_rule(operator);
+            let (_, maybe_infix, rule_precedence) = Self::get_rule(operator);
             if precedence > rule_precedence {
                 break;
             }
@@ -148,7 +289,7 @@ impl<'a> Compiler<'a> {
 
     fn grouping(&mut self) {
         self.expression();
-        self.consume(TokenType::RightParen, Error::MissingRightParen);
+        self.consume(TokenType::RightParen, CompileErrorType::MissingRightParen);
     }
 
     fn number(&mut self) {
@@ -175,7 +316,7 @@ impl<'a> Compiler<'a> {
     fn binary(&mut self) {
         if let Some(operator) = self.parser.previous_type() {
             // right operand
-            let rule = get_rule(operator);
+            let rule = Self::get_rule(operator);
             self.parse_precedence(rule.2.next());
             match operator {
                 TokenType::BangEqual => emit!(self, Op::Equal, Op::Not),
@@ -203,11 +344,71 @@ impl<'a> Compiler<'a> {
     }
 
     fn string(&mut self) {
-        if let Some(Ok(t)) = &self.parser.previous {
-            let text_without_quotes = t.text[1..t.text.len() - 1].to_string();
-            let ptr = self.vm.alloc(ObjectData::r#String(text_without_quotes));
+        let text_without_quotes = if let Some(Ok(t)) = &self.parser.previous {
+            t.text[1..t.text.len() - 1].to_string()
+        } else {
+            return;
+        };
 
-            emit!(self, const, Value::Object(ptr));
+        emit!(const self: Constant / ConstantLong, Value::r#String(text_without_quotes))
+    }
+
+    fn variable(&mut self) {
+        let token = if let Some(Ok(token)) = &self.parser.previous {
+            token.clone()
+        } else {
+            unreachable!();
+        };
+
+        self.named_variable(&token);
+    }
+
+    fn named_variable(&mut self, Token { text, .. }: &Token) {
+        emit!(const self: GetGlobal / GetGlobalLong, Value::r#String(text.to_string()));
+    }
+
+    fn get_rule(sigil: TokenType) -> Rule<'compile> {
+        use TokenType::*;
+
+        match sigil {
+            LeftParen => (Some(Self::grouping), None, Precedence::None),
+            RightParen => (None, None, Precedence::None),
+            LeftBrace => (None, None, Precedence::None),
+            RightBrace => (None, None, Precedence::None),
+            Comma => (None, None, Precedence::None),
+            Dot => (None, None, Precedence::None),
+            Minus => (Some(Self::unary), Some(Self::binary), Precedence::Term),
+            Plus => (None, Some(Self::binary), Precedence::Term),
+            Semi => (None, None, Precedence::None),
+            Slash => (None, Some(Self::binary), Precedence::Factor),
+            Star => (None, Some(Self::binary), Precedence::Factor),
+            Bang => (Some(Self::unary), None, Precedence::None),
+            BangEqual => (None, Some(Self::binary), Precedence::Equality),
+            Equal => (None, None, Precedence::None),
+            DoubleEqual => (None, Some(Self::binary), Precedence::Equality),
+            Greater => (None, Some(Self::binary), Precedence::Comparison),
+            GreaterEqual => (None, Some(Self::binary), Precedence::Comparison),
+            Less => (None, Some(Self::binary), Precedence::Comparison),
+            LessEqual => (None, Some(Self::binary), Precedence::Comparison),
+            Identifier => (Some(Self::variable), None, Precedence::None),
+            r#String => (Some(Self::string), None, Precedence::None),
+            Number => (Some(Self::number), None, Precedence::None),
+            And => (None, None, Precedence::None),
+            Class => (None, None, Precedence::None),
+            Else => (None, None, Precedence::None),
+            False => (Some(Self::literal), None, Precedence::None),
+            For => (None, None, Precedence::None),
+            Fun => (None, None, Precedence::None),
+            If => (None, None, Precedence::None),
+            Nil => (Some(Self::literal), None, Precedence::None),
+            Or => (None, None, Precedence::None),
+            Print => (None, None, Precedence::None),
+            Return => (None, None, Precedence::None),
+            Super => (None, None, Precedence::None),
+            This => (None, None, Precedence::None),
+            True => (Some(Self::literal), None, Precedence::None),
+            Var => (None, None, Precedence::None),
+            While => (None, None, Precedence::None),
         }
     }
 }
@@ -216,6 +417,7 @@ struct Parser<'a> {
     current: MaybeToken<'a>,
     previous: MaybeToken<'a>,
     line: usize,
+    panic_mode: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -233,58 +435,6 @@ impl<'a> Parser<'a> {
         } else {
             None
         }
-    }
-}
-
-type ParseFn<'a, 'b> = fn(&'b mut Compiler<'a>);
-type Rule<'a, 'b> = (Option<ParseFn<'a, 'b>>, Option<ParseFn<'a, 'b>>, Precedence);
-
-fn get_rule<'a, 'b>(sigil: TokenType) -> Rule<'a, 'b> {
-    use TokenType::*;
-
-    match sigil {
-        LeftParen => (Some(Compiler::grouping), None, Precedence::None),
-        RightParen => (None, None, Precedence::None),
-        LeftBrace => (None, None, Precedence::None),
-        RightBrace => (None, None, Precedence::None),
-        Comma => (None, None, Precedence::None),
-        Dot => (None, None, Precedence::None),
-        Minus => (
-            Some(Compiler::unary),
-            Some(Compiler::binary),
-            Precedence::Term,
-        ),
-        Plus => (None, Some(Compiler::binary), Precedence::Term),
-        Semi => (None, None, Precedence::None),
-        Slash => (None, Some(Compiler::binary), Precedence::Factor),
-        Star => (None, Some(Compiler::binary), Precedence::Factor),
-        Bang => (Some(Compiler::unary), None, Precedence::None),
-        BangEqual => (None, Some(Compiler::binary), Precedence::Equality),
-        Equal => (None, None, Precedence::None),
-        DoubleEqual => (None, Some(Compiler::binary), Precedence::Equality),
-        Greater => (None, Some(Compiler::binary), Precedence::Comparison),
-        GreaterEqual => (None, Some(Compiler::binary), Precedence::Comparison),
-        Less => (None, Some(Compiler::binary), Precedence::Comparison),
-        LessEqual => (None, Some(Compiler::binary), Precedence::Comparison),
-        Identifier => (None, None, Precedence::None),
-        r#String => (Some(Compiler::string), None, Precedence::None),
-        Number => (Some(Compiler::number), None, Precedence::None),
-        And => (None, None, Precedence::None),
-        Class => (None, None, Precedence::None),
-        Else => (None, None, Precedence::None),
-        False => (Some(Compiler::literal), None, Precedence::None),
-        For => (None, None, Precedence::None),
-        Fun => (None, None, Precedence::None),
-        If => (None, None, Precedence::None),
-        Nil => (Some(Compiler::literal), None, Precedence::None),
-        Or => (None, None, Precedence::None),
-        Print => (None, None, Precedence::None),
-        Return => (None, None, Precedence::None),
-        Super => (None, None, Precedence::None),
-        This => (None, None, Precedence::None),
-        True => (Some(Compiler::literal), None, Precedence::None),
-        Var => (None, None, Precedence::None),
-        While => (None, None, Precedence::None),
     }
 }
 

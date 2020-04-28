@@ -1,10 +1,10 @@
 use std::str::CharIndices;
 
-use super::{Error, Token, TokenType};
+use super::{CompileErrorType, Token, TokenType};
 
 type Iter<'a> = CharIndices<'a>;
 type Entry = Option<(usize, char)>;
-pub(crate) type ScanError = (usize, Error);
+pub(crate) type ScanError = (usize, CompileErrorType);
 
 pub(crate) struct Scanner<'a> {
     source: &'a str,
@@ -72,13 +72,18 @@ impl<'a> Iterator for Scanner<'a> {
                 }
                 TokenType::r#String
             }
-            _ => return Some(Err((self.line, Error::UnexpectedChar))),
+            _ => return Some(Err((self.line, CompileErrorType::UnexpectedChar))),
         };
+
+        let text = self.advance();
+
+        #[cfg(feature = "trace-scanning")]
+        log::debug!("[line {}] {:?} \"{}\"", self.line, token, text);
 
         Some(Ok(Token {
             r#type: token,
             line: self.line,
-            text: self.advance(),
+            text,
         }))
     }
 }
@@ -107,7 +112,7 @@ impl<'a> Scanner<'a> {
             head = &self.source[self.from..idx];
             self.from = idx;
         } else {
-            head = self.source;
+            head = &self.source[self.from..];
         }
 
         head
@@ -172,7 +177,7 @@ impl<'a> Scanner<'a> {
             }
 
             if self.next.is_none() {
-                return Err((self.line, Error::UnterminatedString));
+                return Err((self.line, CompileErrorType::UnterminatedString));
             }
 
             self.next();

@@ -8,6 +8,7 @@ use std::{
 use {
     clap::Clap,
     lox_lang::{Error, ErrorCategory, VM},
+    simplelog::{ConfigBuilder, LevelFilter, SimpleLogger},
 };
 
 #[derive(Clap)]
@@ -17,20 +18,29 @@ struct Params {
 
 fn main() {
     let args = Params::parse();
+    SimpleLogger::init(
+        LevelFilter::Debug,
+        ConfigBuilder::new()
+            .set_thread_level(LevelFilter::Off)
+            .set_time_level(LevelFilter::Off)
+            .set_location_level(LevelFilter::Debug)
+            .build(),
+    )
+    .unwrap();
 
-    if let Err(e) = if let Some(path) = args.script {
-        run_file(&path)
+    if let Some(path) = args.script {
+        if let Err(e) = run_file(&path) {
+            process::exit(match e.category() {
+                ErrorCategory::Compilation => 65,
+                ErrorCategory::Runtime => 70,
+            })
+        };
     } else {
         repl()
-    } {
-        process::exit(match e.category() {
-            ErrorCategory::Compilation => 65,
-            ErrorCategory::Runtime => 70,
-        });
     }
 }
 
-fn repl() -> Result<(), Error> {
+fn repl() {
     let mut vm = VM::default();
     let mut buffer = String::new();
     loop {
@@ -50,13 +60,11 @@ fn repl() -> Result<(), Error> {
             _ => (),
         }
 
-        vm.interpret(buffer.clone())?;
+        let _ = vm.interpret(buffer.clone());
     }
-
-    Ok(())
 }
 
-fn run_file(path: &Path) -> Result<(), Error> {
+fn run_file(path: &Path) -> Result<(), Box<dyn Error>> {
     let source = match fs::read_to_string(path) {
         Ok(code) => code,
         Err(e) => {
@@ -65,5 +73,7 @@ fn run_file(path: &Path) -> Result<(), Error> {
         }
     };
 
-    VM::default().interpret(source)
+    VM::default()
+        .interpret(source)
+        .map_err(|mut errs| errs.pop().unwrap())
 }

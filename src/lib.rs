@@ -1,76 +1,167 @@
 use std::{
-    cmp, fmt,
-    rc::{Rc, Weak},
+    collections::HashMap,
+    error, fmt,
+    io::{self, Write},
 };
 
 mod chunk;
 mod compiler;
-mod error;
 mod scanner;
 mod token;
-
-pub use error::{Error, ErrorCategory};
+mod value;
 
 use {
     chunk::Chunk,
-    compiler::Compiler,
+    compiler::{CompileErrorType, Compiler},
     scanner::{ScanError, Scanner},
     token::{Token, TokenType},
+    value::Value,
 };
 
-pub struct VM {
-    stack: Vec<Value>,
-    heap: Option<Rc<Object>>,
+impl error::Error for dyn Error {}
+
+pub trait Error: fmt::Debug + fmt::Display {
+    fn category(&self) -> ErrorCategory;
 }
 
-impl Default for VM {
+#[derive(Clone, Debug)]
+pub enum ErrorCategory {
+    Compilation,
+    Runtime,
+}
+
+#[derive(Clone, Debug)]
+pub enum RuntimeError {
+    // runtime
+    ArgumentTypes,
+    StackEmpty,
+    UndefinedGlobal(String),
+}
+
+impl Error for RuntimeError {
+    fn category(&self) -> ErrorCategory {
+        ErrorCategory::Runtime
+    }
+}
+
+impl fmt::Display for RuntimeError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        use RuntimeError::*;
+
+        match self {
+            ArgumentTypes => write!(f, "incompatible types for operation"),
+            StackEmpty => write!(f, "tried to pop value from empty stack"),
+            UndefinedGlobal(name) => write!(f, "tried to access undefined variable `{}`", name),
+        }
+    }
+}
+
+/// The Lox virtual machine.
+///
+/// ### Example
+///
+/// ```
+/// # use lox_lang::VM;
+/// let mut vm = VM::default();
+/// vm.interpret("3 + 3 == 6"); // true
+/// ```
+pub struct VM<'a> {
+    stdout: Option<&'a mut dyn Write>,
+    stack: Vec<Value>,
+    globals: HashMap<String, Value>,
+}
+
+impl<'a> Default for VM<'a> {
+    /// The `VM` constructor.
+    ///
+    /// Program output defaults to [`Stdout`]. To customize
+    /// this behavior, see the [`set_streams`] method.
+    ///
+    /// [`set_streams`]: #method.set_streams
+    /// [`Stdout`]: https://doc.rust-lang.org/std/io/struct.Stdout.html
     fn default() -> Self {
         Self {
+            stdout: None,
             stack: Vec::new(),
-            heap: None,
+            globals: HashMap::new(),
         }
     }
 }
 
-impl VM {
-    pub fn interpret<T: AsRef<str>>(&mut self, source: T) -> Result<(), Error> {
-        match Compiler::new(source.as_ref(), self).compile() {
-            Ok(chunk) => {
-                #[cfg(feature = "trace-compilation")]
-                println!("{}", chunk);
+impl<'a, 'b> VM<'a> {
+    /// Compile and run Lox code from source, reporting and returning any errors encountered in the process.
+    pub fn interpret<T: AsRef<str> + 'b>(
+        &mut self,
+        source: T,
+    ) -> Result<(), Vec<Box<dyn Error + 'b>>> {
+        let chunk = Compiler::compile(source.as_ref()).map_err(|errs| {
+            errs.into_iter()
+                .map(|err| Box::new(err) as Box<dyn Error>)
+                .collect::<Vec<_>>()
+        })?;
 
-                match self.run(chunk) {
-                    Ok(_) => Ok(()),
-                    Err(e) => {
-                        eprintln!("{}", e);
-                        Err(e)
-                    }
-                }
-            }
-            Err(compile_errors) => {
-                // report all errors
-                for err in &compile_errors {
-                    eprintln!("{}", err);
-                }
+        #[cfg(feature = "trace-compilation")]
+        log::debug!("\n{}", chunk);
 
-                Err(compile_errors.last().unwrap().err)
-            }
-        }
+        self.run(chunk)
+            .map_err(|err| vec![Box::new(err) as Box<dyn Error>])
     }
 
-    fn run(&mut self, chunk: Chunk) -> Result<(), Error> {
-        macro_rules! binary_op {
-            ( $op:tt, $variant:ident ) => {{
-                match (self.peek(1)?, self.peek(0)?) {
-                    (Value::Number(_), Value::Number(_)) => (),
-                    _ => return Err(Error::ArgumentTypes),
-                }
+    fn run(&mut self, chunk: Chunk) -> Result<(), RuntimeError> {
+        macro_rules! read_constant {
+            ( $index:expr ) => {{
+                chunk.read_constant(*$index as usize)
+            }};
+        }
 
-                // should be infallible now
+        macro_rules! read_string {
+            ( $index:expr ) => {{
+                if let Value::r#String(s) = read_constant!($index) {
+                    s
+                } else {
+                    unreachable!();
+                }
+            }};
+        }
+
+        macro_rules! define_global {
+            ( $index:expr ) => {{
+                let var_name = read_string!($index);
+                let value = self.peek(0)?.clone();
+                self.globals.insert(var_name.clone(), value);
+                self.pop()?;
+            }};
+        }
+
+        macro_rules! get_global {
+            ($index: expr) => {{
+                let var_name = read_string!($index);
+                if let Some(value) = self.globals.get(var_name) {
+                    self.stack.push(value.clone());
+                } else {
+                    return Err(RuntimeError::UndefinedGlobal(var_name.to_string()));
+                }
+            }};
+        }
+
+        macro_rules! binary_op_body {
+            ( $op:tt, $variant:ident ) => {
                 if let (Value::Number(b), Value::Number(a)) =
                     (self.pop()?, self.pop()?) {
                     self.stack.push(Value::$variant(a $op b));
                 }
+            };
+        }
+
+        macro_rules! binary_op {
+            ( $op:tt, $variant:ident ) => {{
+                match (self.peek(1)?, self.peek(0)?) {
+                    (Value::Number(_), Value::Number(_)) => (),
+                    _ => return Err(RuntimeError::ArgumentTypes),
+                }
+
+                // should be infallible now
+                binary_op_body!($op, $variant)
             }};
         }
 
@@ -78,63 +169,55 @@ impl VM {
             {
                 #![cfg(feature = "trace-execution")]
                 // print stack before operation
-                eprint!("          ");
-                for value in &self.stack {
-                    eprint!("[ {} ]", value);
-                }
-                eprintln!();
+                log::debug!(
+                    "          {}",
+                    self.stack
+                        .iter()
+                        .map(|v| format!("[ {} ]", v))
+                        .collect::<String>()
+                );
 
                 // print operation and arguments
-                eprintln!("{:1$x}", chunk, _index);
+                log::debug!("{:1$x}", chunk, _index);
             }
 
             use Op::*;
 
             match instruction {
                 Constant(index) => {
-                    let constant = chunk.read_constant(*index as usize);
-                    self.stack.push(constant);
+                    self.stack.push(read_constant!(index).clone());
                 }
                 ConstantLong(index) => {
-                    let constant = chunk.read_constant(*index as usize);
-                    self.stack.push(constant);
+                    self.stack.push(read_constant!(index).clone());
                 }
                 Nil => self.stack.push(Value::Nil),
                 True => self.stack.push(Value::Boolean(true)),
                 False => self.stack.push(Value::Boolean(false)),
+                Pop => {
+                    self.pop()?;
+                }
+                GetGlobal(index) => get_global!(index),
+                GetGlobalLong(index) => get_global!(index),
+                DefineGlobal(index) => define_global!(index),
+                DefineGlobalLong(index) => define_global!(index),
                 Equal => {
                     let (b, a) = (self.pop()?, self.pop()?);
                     self.stack.push(Value::Boolean(b == a));
                 }
                 Greater => binary_op!(>, Boolean),
                 Less => binary_op!(<, Boolean),
-                Add => {
-                    match (self.peek(1)?, self.peek(0)?) {
-                        (Value::Number(_), Value::Number(_)) => {
-                            if let (Value::Number(b), Value::Number(a)) = (self.pop()?, self.pop()?)
-                            {
-                                self.stack.push(Value::Number(b + a));
-                                continue;
-                            }
-                        }
-                        (Value::Object(obj_a), Value::Object(obj_b)) => {
-                            if let (Some(ref_a), Some(ref_b)) = (obj_a.upgrade(), obj_b.upgrade()) {
-                                if let (ObjectData::r#String(a), ObjectData::r#String(b)) =
-                                    (&ref_a.data, &ref_b.data)
-                                {
-                                    self.pop()?;
-                                    self.pop()?;
-                                    let new_str = ObjectData::r#String(a.to_string() + b);
-                                    let alloc_obj = self.alloc(new_str);
-                                    self.stack.push(Value::Object(alloc_obj));
-                                    continue;
-                                }
-                            }
-                        }
-                        _ => (),
+                Add => match (self.peek(1)?, self.peek(0)?) {
+                    (Value::Number(_), Value::Number(_)) => {
+                        binary_op_body!(+, Number);
                     }
-                    return Err(Error::ArgumentTypes);
-                }
+                    (Value::r#String(_), Value::r#String(_)) => {
+                        if let (Value::r#String(b), Value::r#String(a)) = (self.pop()?, self.pop()?)
+                        {
+                            self.stack.push(Value::r#String(a + &b));
+                        }
+                    }
+                    _ => return Err(RuntimeError::ArgumentTypes),
+                },
                 Subtract => binary_op!(-, Number),
                 Multiply => binary_op!(*, Number),
                 Divide => binary_op!(/, Number),
@@ -146,8 +229,11 @@ impl VM {
                     let value = self.pop()?;
                     self.stack.push(value.negate()?);
                 }
+                Print => {
+                    let val = self.pop()?;
+                    self.print(format_args!("{}\n", val));
+                }
                 Return => {
-                    println!("{}", self.pop()?);
                     break;
                 }
             }
@@ -156,117 +242,71 @@ impl VM {
         Ok(())
     }
 
-    fn pop(&mut self) -> Result<Value, Error> {
-        self.stack.pop().ok_or(Error::StackEmpty)
+    fn pop(&mut self) -> Result<Value, RuntimeError> {
+        self.stack.pop().ok_or(RuntimeError::StackEmpty)
     }
 
-    fn peek(&self, distance: usize) -> Result<&Value, Error> {
+    fn peek(&self, distance: usize) -> Result<&Value, RuntimeError> {
         if self.stack.len() < distance + 1 {
-            return Err(Error::StackEmpty);
+            return Err(RuntimeError::StackEmpty);
         }
 
         self.stack
             .get(self.stack.len() - 1 - distance)
-            .ok_or(Error::StackEmpty)
+            .ok_or(RuntimeError::StackEmpty)
     }
 
-    fn alloc(&mut self, data: ObjectData) -> Weak<Object> {
-        let owner = Rc::new(Object {
-            next: self.heap.take(),
-            data,
-        });
-
-        let weak_ref = Rc::downgrade(&owner);
-        self.heap.replace(owner);
-
-        weak_ref
-    }
-}
-
-#[derive(Clone)]
-pub enum Value {
-    Nil,
-    Boolean(bool),
-    Number(f64),
-    Object(Weak<Object>),
-}
-
-impl fmt::Display for Value {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Self::Nil => write!(f, "nil"),
-            Self::Boolean(b) => write!(f, "{}", b),
-            Self::Number(v) => write!(f, "{}", v),
-            Self::Object(obj) => write!(f, "{}", obj.upgrade().expect(Self::UPGRADE_PANIC)),
-        }
-    }
-}
-
-impl cmp::PartialEq for Value {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Nil, Self::Nil) => true,
-            (Self::Boolean(a), Self::Boolean(b)) => a == b,
-            (Self::Number(a), Self::Number(b)) => a == b,
-            (Self::Object(a), Self::Object(b)) => Weak::ptr_eq(a, b) || a.upgrade() == b.upgrade(),
-            _ => false,
-        }
-    }
-}
-
-type OpResult = Result<Value, Error>;
-
-impl Value {
-    const UPGRADE_PANIC: &'static str =
-        "CRITICAL: Failed to obtain reference to garbage collected object";
-
-    fn is_falsey(&self) -> bool {
-        match self {
-            Self::Nil | Self::Boolean(false) => true,
-            _ => false,
-        }
+    /// Set the stream for program output. Any stream that implements [`Write`] is supported. Pass
+    /// in `None` to use the default value ([`Stdout`]).
+    ///
+    /// ### Example
+    ///
+    /// ```
+    /// # use lox_lang::VM;
+    /// let mut out_buffer = Vec::new();
+    ///
+    /// let mut vm = VM::default();
+    /// vm.set_streams(Some(&mut out_buffer), None);
+    /// vm.interpret("nil == true");
+    /// vm.interpret("5 * 6 + 12");
+    ///
+    /// assert_eq!(String::from_utf8(out_buffer).unwrap(), "false\n42\n");
+    /// ```
+    ///
+    /// [`Stdout`]: https://doc.rust-lang.org/std/io/struct.Stdout.html
+    /// [`Write`]: https://doc.rust-lang.org/std/io/trait.Write.html
+    pub fn set_stream(&mut self, out: Option<&'a mut dyn Write>) {
+        self.stdout = out;
     }
 
-    fn negate(self) -> OpResult {
-        if let Self::Number(a) = self {
-            Ok(Self::Number(-a))
+    fn print(&mut self, args: fmt::Arguments) {
+        if let Some(out) = &mut self.stdout {
+            out.write_fmt(args).unwrap();
         } else {
-            Err(Error::ArgumentTypes)
-        }
-    }
-}
-
-pub struct Object {
-    next: Option<Rc<Self>>,
-    data: ObjectData,
-}
-
-impl cmp::PartialEq for Object {
-    fn eq(&self, other: &Self) -> bool {
-        self.data == other.data
-    }
-}
-
-#[derive(PartialEq)]
-enum ObjectData {
-    r#String(String),
-}
-
-impl fmt::Display for Object {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match &self.data {
-            ObjectData::r#String(s) => write!(f, "{}", s),
+            io::stdout().write_fmt(args).unwrap();
         }
     }
 }
 
 #[derive(Clone)]
 enum Op {
+    // constants
     Constant(u8),
     ConstantLong(u16),
+
+    // immediates
     Nil,
     True,
     False,
+
+    // actions
+    Pop,
+    GetGlobal(u8),
+    GetGlobalLong(u16),
+    DefineGlobal(u8),
+    DefineGlobalLong(u16),
+
+    // operators
     Equal,
     Greater,
     Less,
@@ -276,29 +316,44 @@ enum Op {
     Divide,
     Not,
     Negate,
+
+    // control flow
+    Print,
     Return,
 }
 
 impl Op {
     fn disassemble<W: fmt::Write>(&self, chunk: &Chunk, f: &mut W) -> fmt::Result {
+        use Op::*;
+
+        macro_rules! constant_instr {
+            ($name:literal, $index:expr) => {{
+                write!(f, concat!($name, "\t{}"), chunk.constants[*$index as usize])
+            }};
+        }
+
         match self {
-            Self::Constant(index) => write!(f, "CONSTANT\t{}", chunk.constants[*index as usize]),
-            Self::ConstantLong(index) => {
-                write!(f, "CONSTANT_LONG\t{}", chunk.constants[*index as usize])
-            }
-            Self::Nil => write!(f, "NIL"),
-            Self::True => write!(f, "TRUE"),
-            Self::False => write!(f, "FALSE"),
-            Self::Equal => write!(f, "EQUAL"),
-            Self::Greater => write!(f, "GREATER"),
-            Self::Less => write!(f, "LESS"),
-            Self::Add => write!(f, "ADD"),
-            Self::Subtract => write!(f, "SUBTRACT"),
-            Self::Multiply => write!(f, "MULTIPLY"),
-            Self::Divide => write!(f, "DIVIDE"),
-            Self::Not => write!(f, "NOT"),
-            Self::Negate => write!(f, "NEGATE"),
-            Self::Return => write!(f, "RETURN"),
+            Constant(index) => constant_instr!("CONSTANT", index),
+            ConstantLong(index) => constant_instr!("CONSTANT_LONG", index),
+            Nil => write!(f, "NIL"),
+            True => write!(f, "TRUE"),
+            False => write!(f, "FALSE"),
+            Pop => write!(f, "POP"),
+            GetGlobal(index) => constant_instr!("GET_GLOBAL", index),
+            GetGlobalLong(index) => constant_instr!("GET_GLOBAL_LONG", index),
+            DefineGlobal(index) => constant_instr!("DEF_GLOBAL", index),
+            DefineGlobalLong(index) => constant_instr!("DEF_GLOBAL_LONG", index),
+            Equal => write!(f, "EQUAL"),
+            Greater => write!(f, "GREATER"),
+            Less => write!(f, "LESS"),
+            Add => write!(f, "ADD"),
+            Subtract => write!(f, "SUBTRACT"),
+            Multiply => write!(f, "MULTIPLY"),
+            Divide => write!(f, "DIVIDE"),
+            Not => write!(f, "NOT"),
+            Negate => write!(f, "NEGATE"),
+            Print => write!(f, "PRINT"),
+            Return => write!(f, "RETURN"),
         }
     }
 }

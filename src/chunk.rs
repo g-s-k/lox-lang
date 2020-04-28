@@ -62,7 +62,7 @@ impl Chunk {
     }
 
     /// Adds the value to the Chunk's constant table and returns its index
-    fn add_constant(&mut self, value: Value) -> usize {
+    pub fn add_constant(&mut self, value: Value) -> usize {
         self.constants.push(value);
         self.constants.len() - 1
     }
@@ -103,8 +103,8 @@ impl Chunk {
         (line_num, is_first)
     }
 
-    pub fn read_constant(&self, index: usize) -> Value {
-        self.constants[index].clone()
+    pub fn read_constant(&self, index: usize) -> &Value {
+        &self.constants[index]
     }
 }
 
