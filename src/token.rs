@@ -1,3 +1,4 @@
+#[derive(Clone, Debug)]
 pub(crate) struct Token<'a> {
     pub(crate) r#type: TokenType,
     pub(crate) text: &'a str,

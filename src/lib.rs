@@ -6,7 +6,7 @@ mod token;
 
 use {
     compiler::Compiler,
-    scanner::Scanner,
+    scanner::{ScanError, Scanner},
     token::{Token, TokenType},
 };
 
@@ -22,9 +22,22 @@ impl Default for VM {
 
 impl VM {
     pub fn interpret(&mut self, source: String) -> Result<(), Error> {
-        let mut compiler = Compiler::new(&source);
-        let chunk = compiler.compile()?;
-        self.run(chunk)
+        match Compiler::new(&source).compile() {
+            Ok(chunk) => {
+                #[cfg(feature = "trace-compilation")]
+                println!("{}", chunk);
+
+                self.run(chunk)
+            }
+            Err(compile_errors) => {
+                // report all errors
+                for err in &compile_errors {
+                    eprintln!("{}", err);
+                }
+
+                Err(compile_errors.last().unwrap().err)
+            }
+        }
     }
 
     fn run(&mut self, chunk: Chunk) -> Result<(), Error> {
@@ -76,7 +89,7 @@ impl VM {
                     self.stack.push(value.negate()?);
                 }
                 Op::Return => {
-                    println!("{}", self.stack.pop().unwrap());
+                    println!("{}", self.pop()?);
                     break;
                 }
             }
@@ -95,14 +108,25 @@ pub enum ErrorCategory {
     Runtime,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum Error {
+    UnexpectedChar,
+    UnterminatedString,
+    MissingRightParen,
+    MissingPrefixExpr,
+    ExpectedEOF,
+
     StackEmpty,
 }
 
 impl Error {
-    pub fn category(&self) -> ErrorCategory {
+    pub fn category(self) -> ErrorCategory {
         match self {
+            Self::UnexpectedChar
+            | Self::UnterminatedString
+            | Self::ExpectedEOF
+            | Self::MissingRightParen
+            | Self::MissingPrefixExpr => ErrorCategory::Compilation,
             Self::StackEmpty => ErrorCategory::Runtime,
         }
     }
@@ -110,7 +134,14 @@ impl Error {
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "lox error")
+        match self {
+            Self::UnexpectedChar => write!(f, "unexpected character"),
+            Self::UnterminatedString => write!(f, "unterminated string"),
+            Self::MissingRightParen => write!(f, "expected ')'"),
+            Self::MissingPrefixExpr => write!(f, "expected expression"),
+            Self::ExpectedEOF => write!(f, "expected end of input"),
+            Self::StackEmpty => write!(f, "tried to pop value from empty stack"),
+        }
     }
 }
 
