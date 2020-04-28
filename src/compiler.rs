@@ -152,7 +152,8 @@ impl<'a> Compiler<'a> {
     fn number(&mut self) {
         if let Some(Ok(token)) = &self.parser.previous {
             if let Ok(v) = token.text.parse() {
-                self.chunk.write_constant(Value(v), self.parser.line);
+                self.chunk
+                    .write_constant(Value::Number(v), self.parser.line);
             }
         }
     }
@@ -162,6 +163,7 @@ impl<'a> Compiler<'a> {
             self.parse_precedence(Precedence::Unary);
 
             match operator {
+                TokenType::Bang => emit!(self, Op::Not),
                 TokenType::Minus => emit!(self, Op::Negate),
                 _ => unreachable!(),
             }
@@ -173,16 +175,28 @@ impl<'a> Compiler<'a> {
             // right operand
             let rule = get_rule(operator);
             self.parse_precedence(rule.2.next());
-            emit!(
-                self,
-                match operator {
-                    TokenType::Plus => Op::Add,
-                    TokenType::Minus => Op::Subtract,
-                    TokenType::Star => Op::Multiply,
-                    TokenType::Slash => Op::Divide,
-                    _ => unreachable!(),
-                }
-            );
+            match operator {
+                TokenType::BangEqual => emit!(self, Op::Equal, Op::Not),
+                TokenType::DoubleEqual => emit!(self, Op::Equal),
+                TokenType::Greater => emit!(self, Op::Greater),
+                TokenType::GreaterEqual => emit!(self, Op::Less, Op::Not),
+                TokenType::Less => emit!(self, Op::Less),
+                TokenType::LessEqual => emit!(self, Op::Greater, Op::Not),
+                TokenType::Plus => emit!(self, Op::Add),
+                TokenType::Minus => emit!(self, Op::Subtract),
+                TokenType::Star => emit!(self, Op::Multiply),
+                TokenType::Slash => emit!(self, Op::Divide),
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    fn literal(&mut self) {
+        match self.parser.previous_type() {
+            Some(TokenType::False) => emit!(self, Op::False),
+            Some(TokenType::Nil) => emit!(self, Op::Nil),
+            Some(TokenType::True) => emit!(self, Op::True),
+            _ => unreachable!(),
         }
     }
 }
@@ -233,31 +247,31 @@ fn get_rule<'a, 'b>(sigil: TokenType) -> Rule<'a, 'b> {
         Semi => (None, None, Precedence::None),
         Slash => (None, Some(Compiler::binary), Precedence::Factor),
         Star => (None, Some(Compiler::binary), Precedence::Factor),
-        Bang => (None, None, Precedence::None),
-        BangEqual => (None, None, Precedence::None),
+        Bang => (Some(Compiler::unary), None, Precedence::None),
+        BangEqual => (None, Some(Compiler::binary), Precedence::Equality),
         Equal => (None, None, Precedence::None),
-        DoubleEqual => (None, None, Precedence::None),
-        Greater => (None, None, Precedence::None),
-        GreaterEqual => (None, None, Precedence::None),
-        Less => (None, None, Precedence::None),
-        LessEqual => (None, None, Precedence::None),
+        DoubleEqual => (None, Some(Compiler::binary), Precedence::Equality),
+        Greater => (None, Some(Compiler::binary), Precedence::Comparison),
+        GreaterEqual => (None, Some(Compiler::binary), Precedence::Comparison),
+        Less => (None, Some(Compiler::binary), Precedence::Comparison),
+        LessEqual => (None, Some(Compiler::binary), Precedence::Comparison),
         Identifier => (None, None, Precedence::None),
         r#String => (None, None, Precedence::None),
         Number => (Some(Compiler::number), None, Precedence::None),
         And => (None, None, Precedence::None),
         Class => (None, None, Precedence::None),
         Else => (None, None, Precedence::None),
-        False => (None, None, Precedence::None),
+        False => (Some(Compiler::literal), None, Precedence::None),
         For => (None, None, Precedence::None),
         Fun => (None, None, Precedence::None),
         If => (None, None, Precedence::None),
-        Nil => (None, None, Precedence::None),
+        Nil => (Some(Compiler::literal), None, Precedence::None),
         Or => (None, None, Precedence::None),
         Print => (None, None, Precedence::None),
         Return => (None, None, Precedence::None),
         Super => (None, None, Precedence::None),
         This => (None, None, Precedence::None),
-        True => (None, None, Precedence::None),
+        True => (Some(Compiler::literal), None, Precedence::None),
         Var => (None, None, Precedence::None),
         While => (None, None, Precedence::None),
     }

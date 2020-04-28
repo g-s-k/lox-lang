@@ -1,10 +1,15 @@
 use std::fmt;
 
+mod chunk;
 mod compiler;
+mod error;
 mod scanner;
 mod token;
 
+pub use error::{Error, ErrorCategory};
+
 use {
+    chunk::Chunk,
     compiler::Compiler,
     scanner::{ScanError, Scanner},
     token::{Token, TokenType},
@@ -21,13 +26,19 @@ impl Default for VM {
 }
 
 impl VM {
-    pub fn interpret(&mut self, source: String) -> Result<(), Error> {
-        match Compiler::new(&source).compile() {
+    pub fn interpret<T: AsRef<str>>(&mut self, source: T) -> Result<(), Error> {
+        match Compiler::new(source.as_ref()).compile() {
             Ok(chunk) => {
                 #[cfg(feature = "trace-compilation")]
                 println!("{}", chunk);
 
-                self.run(chunk)
+                match self.run(chunk) {
+                    Ok(_) => Ok(()),
+                    Err(e) => {
+                        eprintln!("{}", e);
+                        Err(e)
+                    }
+                }
             }
             Err(compile_errors) => {
                 // report all errors
@@ -41,6 +52,21 @@ impl VM {
     }
 
     fn run(&mut self, chunk: Chunk) -> Result<(), Error> {
+        macro_rules! binary_op {
+            ( $op:tt, $variant:ident ) => {{
+                match (self.peek(1)?, self.peek(0)?) {
+                    (Value::Number(_), Value::Number(_)) => (),
+                    _ => return Err(Error::ArgumentTypes),
+                }
+
+                // should be infallible now
+                if let (Value::Number(b), Value::Number(a)) =
+                    (self.pop()?, self.pop()?) {
+                self.stack.push(Value::$variant(a $op b));
+                }
+            }};
+        }
+
         for (_index, instruction) in chunk.code.iter().enumerate() {
             {
                 #![cfg(feature = "trace-execution")]
@@ -55,40 +81,39 @@ impl VM {
                 eprintln!("{:1$x}", chunk, _index);
             }
 
+            use Op::*;
+
             match instruction {
-                Op::Constant(index) => {
+                Constant(index) => {
                     let constant = chunk.read_constant(*index as usize);
                     self.stack.push(constant);
                 }
-                Op::ConstantLong(index) => {
+                ConstantLong(index) => {
                     let constant = chunk.read_constant(*index as usize);
                     self.stack.push(constant);
                 }
-                Op::Add => {
-                    let b = self.pop()?;
-                    let a = self.pop()?;
-                    self.stack.push(a.plus(b)?);
+                Nil => self.stack.push(Value::Nil),
+                True => self.stack.push(Value::Boolean(true)),
+                False => self.stack.push(Value::Boolean(false)),
+                Equal => {
+                    let (b, a) = (self.pop()?, self.pop()?);
+                    self.stack.push(Value::Boolean(b == a));
                 }
-                Op::Subtract => {
-                    let b = self.pop()?;
-                    let a = self.pop()?;
-                    self.stack.push(a.minus(b)?);
+                Greater => binary_op!(>, Boolean),
+                Less => binary_op!(<, Boolean),
+                Add => binary_op!(+, Number),
+                Subtract => binary_op!(-, Number),
+                Multiply => binary_op!(*, Number),
+                Divide => binary_op!(/, Number),
+                Not => {
+                    let val = Value::Boolean(self.pop()?.is_falsey());
+                    self.stack.push(val);
                 }
-                Op::Multiply => {
-                    let b = self.pop()?;
-                    let a = self.pop()?;
-                    self.stack.push(a.times(b)?);
-                }
-                Op::Divide => {
-                    let b = self.pop()?;
-                    let a = self.pop()?;
-                    self.stack.push(a.divided_by(b)?);
-                }
-                Op::Negate => {
+                Negate => {
                     let value = self.pop()?;
                     self.stack.push(value.negate()?);
                 }
-                Op::Return => {
+                Return => {
                     println!("{}", self.pop()?);
                     break;
                 }
@@ -101,85 +126,47 @@ impl VM {
     fn pop(&mut self) -> Result<Value, Error> {
         self.stack.pop().ok_or(Error::StackEmpty)
     }
-}
 
-pub enum ErrorCategory {
-    Compilation,
-    Runtime,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum Error {
-    UnexpectedChar,
-    UnterminatedString,
-    MissingRightParen,
-    MissingPrefixExpr,
-    ExpectedEOF,
-
-    StackEmpty,
-}
-
-impl Error {
-    pub fn category(self) -> ErrorCategory {
-        match self {
-            Self::UnexpectedChar
-            | Self::UnterminatedString
-            | Self::ExpectedEOF
-            | Self::MissingRightParen
-            | Self::MissingPrefixExpr => ErrorCategory::Compilation,
-            Self::StackEmpty => ErrorCategory::Runtime,
-        }
+    fn peek(&self, distance: usize) -> Result<&Value, Error> {
+        self.stack
+            .get(self.stack.len() - 1 - distance)
+            .ok_or(Error::StackEmpty)
     }
 }
 
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Self::UnexpectedChar => write!(f, "unexpected character"),
-            Self::UnterminatedString => write!(f, "unterminated string"),
-            Self::MissingRightParen => write!(f, "expected ')'"),
-            Self::MissingPrefixExpr => write!(f, "expected expression"),
-            Self::ExpectedEOF => write!(f, "expected end of input"),
-            Self::StackEmpty => write!(f, "tried to pop value from empty stack"),
-        }
-    }
+#[derive(Clone, PartialEq)]
+pub enum Value {
+    Nil,
+    Boolean(bool),
+    Number(f64),
 }
-
-impl std::error::Error for Error {}
-
-#[derive(Clone)]
-pub struct Value(pub f64);
 
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", self.0)
+        match self {
+            Self::Nil => write!(f, "nil"),
+            Self::Boolean(b) => write!(f, "{}", b),
+            Self::Number(v) => write!(f, "{}", v),
+        }
     }
 }
 
+type OpResult = Result<Value, Error>;
+
 impl Value {
-    fn plus(mut self, other: Self) -> Result<Self, Error> {
-        self.0 += other.0;
-        Ok(self)
+    fn is_falsey(&self) -> bool {
+        match self {
+            Self::Nil | Self::Boolean(false) => true,
+            _ => false,
+        }
     }
 
-    fn minus(mut self, other: Self) -> Result<Self, Error> {
-        self.0 -= other.0;
-        Ok(self)
-    }
-
-    fn times(mut self, other: Self) -> Result<Self, Error> {
-        self.0 *= other.0;
-        Ok(self)
-    }
-
-    fn divided_by(mut self, other: Self) -> Result<Self, Error> {
-        self.0 /= other.0;
-        Ok(self)
-    }
-
-    fn negate(mut self) -> Result<Self, Error> {
-        self.0 *= -1.0;
-        Ok(self)
+    fn negate(self) -> OpResult {
+        if let Self::Number(a) = self {
+            Ok(Self::Number(-a))
+        } else {
+            Err(Error::ArgumentTypes)
+        }
     }
 }
 
@@ -187,10 +174,17 @@ impl Value {
 pub enum Op {
     Constant(u8),
     ConstantLong(u16),
+    Nil,
+    True,
+    False,
+    Equal,
+    Greater,
+    Less,
     Add,
     Subtract,
     Multiply,
     Divide,
+    Not,
     Negate,
     Return,
 }
@@ -202,160 +196,19 @@ impl Op {
             Self::ConstantLong(index) => {
                 write!(f, "CONSTANT_LONG\t{}", chunk.constants[*index as usize])
             }
+            Self::Nil => write!(f, "NIL"),
+            Self::True => write!(f, "TRUE"),
+            Self::False => write!(f, "FALSE"),
+            Self::Equal => write!(f, "EQUAL"),
+            Self::Greater => write!(f, "GREATER"),
+            Self::Less => write!(f, "LESS"),
             Self::Add => write!(f, "ADD"),
             Self::Subtract => write!(f, "SUBTRACT"),
             Self::Multiply => write!(f, "MULTIPLY"),
             Self::Divide => write!(f, "DIVIDE"),
+            Self::Not => write!(f, "NOT"),
             Self::Negate => write!(f, "NEGATE"),
             Self::Return => write!(f, "RETURN"),
         }
-    }
-}
-
-#[derive(Clone)]
-struct LineRecord {
-    line: usize,
-    count: usize,
-}
-
-pub struct Chunk {
-    name: String,
-    constants: Vec<Value>,
-    code: Vec<Op>,
-    lines: Vec<LineRecord>,
-}
-
-impl Chunk {
-    pub fn new<T: ToString>(name: T) -> Self {
-        Self {
-            name: name.to_string(),
-            constants: Vec::new(),
-            code: Vec::new(),
-            lines: Vec::new(),
-        }
-    }
-
-    pub fn write(&mut self, op: Op, line: usize) {
-        self.code.push(op);
-
-        match self.lines.last() {
-            None => self.push_line_record(line),
-            Some(rec) if rec.line < line => self.push_line_record(line),
-            Some(rec) if rec.line == line => {
-                // a little weird looking, but seems like the idiomatic way to update an Option's
-                // wrapped value in place
-                for last in self.lines.last_mut().iter_mut() {
-                    last.count += 1;
-                }
-            }
-            _ => unreachable!("Line number stack should not go backward"),
-        }
-    }
-
-    fn push_line_record(&mut self, line: usize) {
-        self.lines.push(LineRecord { line, count: 1 });
-    }
-
-    pub fn write_constant(&mut self, value: Value, line: usize) -> usize {
-        let idx = self.add_constant(value);
-
-        self.write(
-            if idx > 255 {
-                Op::ConstantLong(idx as u16)
-            } else {
-                Op::Constant(idx as u8)
-            },
-            line,
-        );
-
-        idx
-    }
-
-    /// Adds the value to the Chunk's constant table and returns its index
-    fn add_constant(&mut self, value: Value) -> usize {
-        self.constants.push(value);
-        self.constants.len() - 1
-    }
-
-    fn disassemble_instruction<W: fmt::Write>(&self, index: usize, f: &mut W) -> fmt::Result {
-        write!(f, "{:04} ", index)?;
-
-        let (line, is_first) = self.find_line(index);
-
-        if is_first {
-            write!(f, "{:4} ", line)?;
-        } else {
-            write!(f, "   | ")?;
-        }
-
-        self.code[index].disassemble(self, f)
-    }
-
-    fn find_line(&self, instruction_index: usize) -> (usize, bool) {
-        let mut line_num = 1;
-        let mut is_first = true;
-
-        let mut idx_counter = 0;
-        'outer: for LineRecord { line, count } in &self.lines {
-            line_num = *line;
-            is_first = true;
-
-            for _ in 0..*count {
-                if idx_counter == instruction_index {
-                    break 'outer;
-                }
-
-                idx_counter += 1;
-                is_first = false;
-            }
-        }
-
-        (line_num, is_first)
-    }
-
-    fn read_constant(&self, index: usize) -> Value {
-        self.constants[index].clone()
-    }
-}
-
-impl fmt::Display for Chunk {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        writeln!(f, "== {} ==", self.name)?;
-
-        let mut lines = self.lines.iter();
-        let mut line;
-        let mut line_count = 0; // immediately hooks into advancement below
-        for (idx, op) in self.code.iter().enumerate() {
-            write!(f, "{:04} ", idx)?;
-
-            if line_count == 0 {
-                // advance
-                if let Some(LineRecord { line: l, count: c }) = lines.next() {
-                    line = l;
-                    line_count = *c;
-                } else {
-                    unreachable!("Should not run out of lines before running out of instructions.");
-                }
-
-                write!(f, "{:4} ", line)?;
-            } else {
-                write!(f, "   | ")?;
-            }
-
-            line_count -= 1;
-
-            op.disassemble(self, f)?;
-            writeln!(f)?;
-        }
-        Ok(())
-    }
-}
-
-/// A terrible, shameful, but ultimately necessary thing to do
-impl fmt::LowerHex for Chunk {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let index = f.width().unwrap_or_default();
-
-        self.disassemble_instruction(index, f)
     }
 }
