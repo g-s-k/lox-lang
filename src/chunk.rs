@@ -1,6 +1,6 @@
-use std::fmt;
+use std::{convert::TryInto, fmt};
 
-use super::{Op, Value};
+use super::{CompileErrorType, Op, Value};
 
 #[derive(Clone)]
 struct LineRecord {
@@ -25,7 +25,7 @@ impl Chunk {
         }
     }
 
-    pub fn write(&mut self, op: Op, line: usize) {
+    pub fn write(&mut self, op: Op, line: usize) -> usize {
         self.code.push(op);
 
         match self.lines.last() {
@@ -40,25 +40,12 @@ impl Chunk {
             }
             _ => unreachable!("Line number stack should not go backward"),
         }
+
+        self.code.len() - 1
     }
 
     fn push_line_record(&mut self, line: usize) {
         self.lines.push(LineRecord { line, count: 1 });
-    }
-
-    pub fn write_constant(&mut self, value: Value, line: usize) -> usize {
-        let idx = self.add_constant(value);
-
-        self.write(
-            if idx > 255 {
-                Op::ConstantLong(idx as u16)
-            } else {
-                Op::Constant(idx as u8)
-            },
-            line,
-        );
-
-        idx
     }
 
     /// Adds the value to the Chunk's constant table and returns its index
@@ -105,6 +92,28 @@ impl Chunk {
 
     pub fn read_constant(&self, index: usize) -> &Value {
         &self.constants[index]
+    }
+
+    pub fn patch_jump(&mut self, index: usize) -> Result<(), CompileErrorType> {
+        let distance = self.code.len() - index - 1;
+
+        let distance = match distance.try_into() {
+            Err(e) => {
+                log::error!("{}", e);
+                return Err(CompileErrorType::JumpTooLarge(distance));
+            }
+            Ok(d) => d,
+        };
+
+        match self.code.get_mut(index) {
+            Some(Op::Jump(ref mut old)) | Some(Op::JumpIfFalse(ref mut old)) => *old = distance,
+            other => unreachable!(
+                "attempted to patch jump instruction with wrong index ({:05x} => {:?})",
+                index, other,
+            ),
+        }
+
+        Ok(())
     }
 }
 

@@ -33,6 +33,7 @@ fn main() {
             process::exit(match e.category() {
                 ErrorCategory::Compilation => 65,
                 ErrorCategory::Runtime => 70,
+                _ => 1,
             })
         };
     } else {

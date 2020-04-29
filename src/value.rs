@@ -3,7 +3,7 @@ use std::fmt;
 use super::RuntimeError;
 
 #[derive(Clone, PartialEq)]
-pub enum Value {
+pub(crate) enum Value {
     Nil,
     Boolean(bool),
     Number(f64),

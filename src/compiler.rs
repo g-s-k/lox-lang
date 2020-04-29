@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{convert::TryInto, fmt};
 
 use super::{Chunk, Error, ErrorCategory, Op, ScanError, Scanner, Token, TokenType, Value};
 
@@ -32,13 +32,15 @@ pub enum CompileErrorType {
     // compilation
     UnexpectedChar,
     UnterminatedString,
-    MissingRightParen,
+    MissingLeftParen(&'static str),
+    MissingRightParen(&'static str),
     MissingRightBrace(&'static str),
     MissingPrefixExpr,
     MissingSemi,
     MissingVarName,
     DuplicateLocal(String),
     ReadBeforeDefined(String),
+    JumpTooLarge(usize),
     ExpectedEOF,
 }
 
@@ -49,7 +51,8 @@ impl fmt::Display for CompileErrorType {
         match self {
             UnexpectedChar => write!(f, "unexpected character"),
             UnterminatedString => write!(f, "unterminated string"),
-            MissingRightParen => write!(f, "expected ')'"),
+            MissingLeftParen(location) => write!(f, "expected '(' {}", location),
+            MissingRightParen(location) => write!(f, "expected ')' {}", location),
             MissingRightBrace(location) => write!(f, "expected '}}' {}", location),
             MissingPrefixExpr => write!(f, "expected expression"),
             MissingSemi => write!(f, "expected ';' after statement"),
@@ -58,6 +61,12 @@ impl fmt::Display for CompileErrorType {
             ReadBeforeDefined(who) => {
                 write!(f, "tried to use variable `{}` in its own initializer", who)
             }
+            JumpTooLarge(distance) => write!(
+                f,
+                "jump distance {:x} is too large to fit in a `u16` (max value {:x})",
+                distance,
+                u16::MAX
+            ),
             ExpectedEOF => write!(f, "expected end of input"),
         }
     }
@@ -65,10 +74,9 @@ impl fmt::Display for CompileErrorType {
 
 macro_rules! short_or_long {
     ( $value: expr; $short: ident <> $long: ident ) => {{
-        if $value > 255 {
-            Op::$long($value as u16)
-        } else {
-            Op::$short($value as u8)
+        match $value.try_into() {
+            Ok(v) => Op::$short(v),
+            Err(_) => Op::$long($value as u16),
         }
     }};
 }
@@ -81,8 +89,24 @@ macro_rules! emit {
             $c.parser.line
         );
     }};
-    ( $c:ident, const, $( $val:expr ),* ) => {{
-        $( $c.chunk.write_constant($val, $c.parser.line); )*
+
+    (jump $c: ident : $variant: ident) => {{
+        $c.chunk.write(Op::$variant(u16::MAX), $c.parser.line)
+    }};
+
+    (loop $c: ident : $loop_start: expr) => {{
+        let loop_end = $c.chunk.code.len();
+        let difference = loop_end - $loop_start + 1;
+
+        let difference = match difference.try_into() {
+            Err(_) => {
+                $c.error(CompileErrorType::JumpTooLarge(difference));
+                u16::MAX
+            }
+            Ok(d) => d,
+        };
+
+        $c.chunk.write(Op::Loop(difference), $c.parser.line);
     }};
 
     ( $c:ident, $( $op:expr ),* ) => {{
@@ -130,10 +154,10 @@ impl<'compile> Compiler<'compile> {
 
         emit!(compiler, Op::Return);
 
-        if !compiler.errors.is_empty() {
-            Err(compiler.errors)
-        } else {
+        if compiler.errors.is_empty() {
             Ok(compiler.chunk)
+        } else {
+            Err(compiler.errors)
         }
     }
 
@@ -304,6 +328,9 @@ impl<'compile> Compiler<'compile> {
     fn statement(&mut self) {
         match self.parser.current_type() {
             Some(TokenType::Print) => self.print_statement(),
+            Some(TokenType::For) => self.for_statement(),
+            Some(TokenType::If) => self.if_statement(),
+            Some(TokenType::While) => self.while_statement(),
             Some(TokenType::LeftBrace) => {
                 self.advance();
                 self.begin_scope();
@@ -360,6 +387,147 @@ impl<'compile> Compiler<'compile> {
         emit!(self, Op::Print);
     }
 
+    fn if_statement(&mut self) {
+        // IF
+        self.advance();
+        // (
+        self.consume(
+            TokenType::LeftParen,
+            CompileErrorType::MissingLeftParen("after 'if'"),
+        );
+        // <condition>
+        self.expression();
+        // )
+        self.consume(
+            TokenType::RightParen,
+            CompileErrorType::MissingRightParen("after condition"),
+        );
+
+        let then_jump = emit!(jump self: JumpIfFalse);
+        emit!(self, Op::Pop);
+        // <then branch>
+        self.statement();
+
+        let else_jump = emit!(jump self: Jump);
+        if let Err(e) = self.chunk.patch_jump(then_jump) {
+            self.error(e);
+        }
+        emit!(self, Op::Pop);
+
+        // ELSE
+        if let Some(TokenType::Else) = self.parser.current_type() {
+            self.advance();
+            // <else branch>
+            self.statement();
+        }
+
+        if let Err(e) = self.chunk.patch_jump(else_jump) {
+            self.error(e);
+        }
+    }
+
+    fn while_statement(&mut self) {
+        let loop_start = self.chunk.code.len();
+
+        // WHILE
+        self.advance();
+        // (
+        self.consume(
+            TokenType::LeftParen,
+            CompileErrorType::MissingLeftParen("after 'while'"),
+        );
+        // <condition>
+        self.expression();
+        // )
+        self.consume(
+            TokenType::RightParen,
+            CompileErrorType::MissingRightParen("after condition"),
+        );
+
+        let exit_jmp = emit!(jump self: JumpIfFalse);
+
+        emit!(self, Op::Pop);
+        self.statement();
+
+        emit!(loop self: loop_start);
+
+        if let Err(e) = self.chunk.patch_jump(exit_jmp) {
+            self.error(e);
+        }
+
+        emit!(self, Op::Pop);
+    }
+
+    fn for_statement(&mut self) {
+        self.begin_scope();
+
+        // FOR
+        self.advance();
+        // (
+        self.consume(
+            TokenType::LeftParen,
+            CompileErrorType::MissingLeftParen("after 'for'"),
+        );
+        // <initializer> ;
+        match self.parser.current_type() {
+            Some(TokenType::Semi) => (), // no initializer
+            Some(TokenType::Var) => {
+                self.advance();
+                self.var_declaration();
+            }
+            _ => self.expression_statement(),
+        }
+
+        let mut loop_start = self.chunk.code.len();
+        let exit_jmp;
+
+        // <exit condition> ;
+        if let Some(TokenType::Semi) = self.parser.current_type() {
+            self.advance();
+            exit_jmp = None;
+        } else {
+            self.expression();
+            self.consume(TokenType::Semi, CompileErrorType::MissingSemi);
+
+            exit_jmp = Some(emit!(jump self: JumpIfFalse));
+            emit!(self, Op::Pop);
+        }
+
+        // <post update> )
+        if let Some(TokenType::RightParen) = self.parser.current_type() {
+            self.advance();
+        } else {
+            let body_jmp = emit!(jump self: Jump);
+
+            let increment_start = self.chunk.code.len();
+            self.expression();
+            emit!(self, Op::Pop);
+            self.consume(
+                TokenType::RightParen,
+                CompileErrorType::MissingRightParen("after 'for' clauses"),
+            );
+
+            emit!(loop self: loop_start);
+            loop_start = increment_start;
+            if let Err(e) = self.chunk.patch_jump(body_jmp) {
+                self.error(e);
+            }
+        }
+
+        // <body>
+        self.statement();
+
+        emit!(loop self: loop_start);
+
+        if let Some(jmp) = exit_jmp {
+            if let Err(e) = self.chunk.patch_jump(jmp) {
+                self.error(e);
+            }
+        }
+
+        self.end_scope();
+    }
+
     fn expression_statement(&mut self) {
         self.expression();
         self.consume(TokenType::Semi, CompileErrorType::MissingSemi);
@@ -398,14 +566,16 @@ impl<'compile> Compiler<'compile> {
 
     fn grouping(&mut self, _: bool) {
         self.expression();
-        self.consume(TokenType::RightParen, CompileErrorType::MissingRightParen);
+        self.consume(
+            TokenType::RightParen,
+            CompileErrorType::MissingRightParen("after expression"),
+        );
     }
 
     fn number(&mut self, _: bool) {
         if let Some(Ok(token)) = &self.parser.previous {
             if let Ok(v) = token.text.parse() {
-                self.chunk
-                    .write_constant(Value::Number(v), self.parser.line);
+                emit!(const self: Constant / ConstantLong, Value::Number(v))
             }
         }
     }
@@ -508,48 +678,55 @@ impl<'compile> Compiler<'compile> {
         None
     }
 
-    fn get_rule(sigil: TokenType) -> Rule<'compile> {
-        use TokenType::*;
+    fn and(&mut self, _: bool) {
+        let end_jmp = emit!(jump self: JumpIfFalse);
 
+        emit!(self, Op::Pop);
+        self.parse_precedence(Precedence::And);
+
+        if let Err(e) = self.chunk.patch_jump(end_jmp) {
+            self.error(e);
+        }
+    }
+
+    fn or(&mut self, _: bool) {
+        let else_jmp = emit!(jump self: JumpIfFalse);
+        let end_jmp = emit!(jump self: Jump);
+
+        if let Err(e) = self.chunk.patch_jump(else_jmp) {
+            self.error(e);
+        }
+        emit!(self, Op::Pop);
+
+        self.parse_precedence(Precedence::Or);
+        if let Err(e) = self.chunk.patch_jump(end_jmp) {
+            self.error(e);
+        }
+    }
+
+    fn get_rule(sigil: TokenType) -> Rule<'compile> {
         match sigil {
-            LeftParen => (Some(Self::grouping), None, Precedence::None),
-            RightParen => (None, None, Precedence::None),
-            LeftBrace => (None, None, Precedence::None),
-            RightBrace => (None, None, Precedence::None),
-            Comma => (None, None, Precedence::None),
-            Dot => (None, None, Precedence::None),
-            Minus => (Some(Self::unary), Some(Self::binary), Precedence::Term),
-            Plus => (None, Some(Self::binary), Precedence::Term),
-            Semi => (None, None, Precedence::None),
-            Slash => (None, Some(Self::binary), Precedence::Factor),
-            Star => (None, Some(Self::binary), Precedence::Factor),
-            Bang => (Some(Self::unary), None, Precedence::None),
-            BangEqual => (None, Some(Self::binary), Precedence::Equality),
-            Equal => (None, None, Precedence::None),
-            DoubleEqual => (None, Some(Self::binary), Precedence::Equality),
-            Greater => (None, Some(Self::binary), Precedence::Comparison),
-            GreaterEqual => (None, Some(Self::binary), Precedence::Comparison),
-            Less => (None, Some(Self::binary), Precedence::Comparison),
-            LessEqual => (None, Some(Self::binary), Precedence::Comparison),
-            Identifier => (Some(Self::variable), None, Precedence::None),
-            r#String => (Some(Self::string), None, Precedence::None),
-            Number => (Some(Self::number), None, Precedence::None),
-            And => (None, None, Precedence::None),
-            Class => (None, None, Precedence::None),
-            Else => (None, None, Precedence::None),
-            False => (Some(Self::literal), None, Precedence::None),
-            For => (None, None, Precedence::None),
-            Fun => (None, None, Precedence::None),
-            If => (None, None, Precedence::None),
-            Nil => (Some(Self::literal), None, Precedence::None),
-            Or => (None, None, Precedence::None),
-            Print => (None, None, Precedence::None),
-            Return => (None, None, Precedence::None),
-            Super => (None, None, Precedence::None),
-            This => (None, None, Precedence::None),
-            True => (Some(Self::literal), None, Precedence::None),
-            Var => (None, None, Precedence::None),
-            While => (None, None, Precedence::None),
+            TokenType::LeftParen => (Some(Self::grouping), None, Precedence::None),
+            TokenType::Minus => (Some(Self::unary), Some(Self::binary), Precedence::Term),
+            TokenType::Plus => (None, Some(Self::binary), Precedence::Term),
+            TokenType::Slash | TokenType::Star => (None, Some(Self::binary), Precedence::Factor),
+            TokenType::Bang => (Some(Self::unary), None, Precedence::None),
+            TokenType::BangEqual | TokenType::DoubleEqual => {
+                (None, Some(Self::binary), Precedence::Equality)
+            }
+            TokenType::Greater
+            | TokenType::GreaterEqual
+            | TokenType::Less
+            | TokenType::LessEqual => (None, Some(Self::binary), Precedence::Comparison),
+            TokenType::Identifier => (Some(Self::variable), None, Precedence::None),
+            TokenType::r#String => (Some(Self::string), None, Precedence::None),
+            TokenType::Number => (Some(Self::number), None, Precedence::None),
+            TokenType::And => (None, Some(Self::and), Precedence::And),
+            TokenType::Or => (None, Some(Self::or), Precedence::Or),
+            TokenType::False | TokenType::Nil | TokenType::True => {
+                (Some(Self::literal), None, Precedence::None)
+            }
+            _ => (None, None, Precedence::None),
         }
     }
 }
