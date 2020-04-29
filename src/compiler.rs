@@ -83,7 +83,7 @@ pub(crate) struct Compiler<'compile> {
     chunk: Chunk,
 }
 
-type ParseFn<'compile> = fn(&mut Compiler<'compile>);
+type ParseFn<'compile> = fn(&mut Compiler<'compile>, bool);
 type Rule<'a> = (Option<ParseFn<'a>>, Option<ParseFn<'a>>, Precedence);
 
 impl<'compile> Compiler<'compile> {
@@ -221,6 +221,7 @@ impl<'compile> Compiler<'compile> {
         let var_const = self.parse_variable(CompileErrorType::MissingVarName);
 
         if let Some(TokenType::Equal) = self.parser.current_type() {
+            self.advance();
             self.expression();
         } else {
             emit!(self, Op::Nil);
@@ -239,14 +240,14 @@ impl<'compile> Compiler<'compile> {
     }
 
     fn statement(&mut self) {
-        self.advance();
-        match self.parser.previous_type() {
+        match self.parser.current_type() {
             Some(TokenType::Print) => self.print_statement(),
             _ => self.expression_statement(),
         }
     }
 
     fn print_statement(&mut self) {
+        self.advance();
         self.expression();
         self.consume(TokenType::Semi, CompileErrorType::MissingSemi);
         emit!(self, Op::Print);
@@ -259,10 +260,11 @@ impl<'compile> Compiler<'compile> {
     }
 
     fn parse_precedence(&mut self, precedence: Precedence) {
+        let can_assign = (precedence as isize) <= (Precedence::Assignment as isize);
         self.advance();
         if let Some(operator) = self.parser.previous_type() {
             if let (Some(prefix_func), _, _) = Self::get_rule(operator) {
-                prefix_func(self);
+                prefix_func(self, can_assign);
             } else {
                 self.error(CompileErrorType::MissingPrefixExpr);
                 return;
@@ -278,7 +280,7 @@ impl<'compile> Compiler<'compile> {
             self.advance();
 
             if let Some(infix_func) = maybe_infix {
-                infix_func(self);
+                infix_func(self, can_assign);
             }
         }
     }
@@ -287,12 +289,12 @@ impl<'compile> Compiler<'compile> {
         self.parse_precedence(Precedence::Assignment);
     }
 
-    fn grouping(&mut self) {
+    fn grouping(&mut self, _: bool) {
         self.expression();
         self.consume(TokenType::RightParen, CompileErrorType::MissingRightParen);
     }
 
-    fn number(&mut self) {
+    fn number(&mut self, _: bool) {
         if let Some(Ok(token)) = &self.parser.previous {
             if let Ok(v) = token.text.parse() {
                 self.chunk
@@ -301,7 +303,7 @@ impl<'compile> Compiler<'compile> {
         }
     }
 
-    fn unary(&mut self) {
+    fn unary(&mut self, _: bool) {
         if let Some(operator) = self.parser.previous_type() {
             self.parse_precedence(Precedence::Unary);
 
@@ -313,7 +315,7 @@ impl<'compile> Compiler<'compile> {
         }
     }
 
-    fn binary(&mut self) {
+    fn binary(&mut self, _: bool) {
         if let Some(operator) = self.parser.previous_type() {
             // right operand
             let rule = Self::get_rule(operator);
@@ -334,7 +336,7 @@ impl<'compile> Compiler<'compile> {
         }
     }
 
-    fn literal(&mut self) {
+    fn literal(&mut self, _: bool) {
         match self.parser.previous_type() {
             Some(TokenType::False) => emit!(self, Op::False),
             Some(TokenType::Nil) => emit!(self, Op::Nil),
@@ -343,7 +345,7 @@ impl<'compile> Compiler<'compile> {
         }
     }
 
-    fn string(&mut self) {
+    fn string(&mut self, _: bool) {
         let text_without_quotes = if let Some(Ok(t)) = &self.parser.previous {
             t.text[1..t.text.len() - 1].to_string()
         } else {
@@ -353,7 +355,7 @@ impl<'compile> Compiler<'compile> {
         emit!(const self: Constant / ConstantLong, Value::r#String(text_without_quotes))
     }
 
-    fn variable(&mut self) {
+    fn variable(&mut self, _: bool) {
         let token = if let Some(Ok(token)) = &self.parser.previous {
             token.clone()
         } else {
@@ -364,7 +366,14 @@ impl<'compile> Compiler<'compile> {
     }
 
     fn named_variable(&mut self, Token { text, .. }: &Token) {
-        emit!(const self: GetGlobal / GetGlobalLong, Value::r#String(text.to_string()));
+        let value = Value::r#String(text.to_string());
+        if let Some(TokenType::Equal) = self.parser.current_type() {
+            self.advance();
+            self.expression();
+            emit!(const self: SetGlobal / SetGlobalLong, value);
+        } else {
+            emit!(const self: GetGlobal / GetGlobalLong, value);
+        }
     }
 
     fn get_rule(sigil: TokenType) -> Rule<'compile> {
@@ -438,7 +447,7 @@ impl<'a> Parser<'a> {
     }
 }
 
-#[derive(PartialEq, PartialOrd)]
+#[derive(Clone, Copy, PartialEq, PartialOrd)]
 enum Precedence {
     None = 0,
     Assignment,

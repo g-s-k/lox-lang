@@ -144,6 +144,18 @@ impl<'a, 'b> VM<'a> {
             }};
         }
 
+        macro_rules! set_global {
+            ($index: expr) => {{
+                let var_name = read_string!($index);
+                let value = self.peek(0)?.clone();
+                if let None = self.globals.insert(var_name.clone(), value) {
+                    self.globals.remove(var_name);
+                    return Err(RuntimeError::UndefinedGlobal(var_name.to_string()));
+                }
+                self.pop()?;
+            }};
+        }
+
         macro_rules! binary_op_body {
             ( $op:tt, $variant:ident ) => {
                 if let (Value::Number(b), Value::Number(a)) =
@@ -200,6 +212,8 @@ impl<'a, 'b> VM<'a> {
                 GetGlobalLong(index) => get_global!(index),
                 DefineGlobal(index) => define_global!(index),
                 DefineGlobalLong(index) => define_global!(index),
+                SetGlobal(index) => set_global!(index),
+                SetGlobalLong(index) => set_global!(index),
                 Equal => {
                     let (b, a) = (self.pop()?, self.pop()?);
                     self.stack.push(Value::Boolean(b == a));
@@ -305,6 +319,8 @@ enum Op {
     GetGlobalLong(u16),
     DefineGlobal(u8),
     DefineGlobalLong(u16),
+    SetGlobal(u8),
+    SetGlobalLong(u16),
 
     // operators
     Equal,
@@ -343,6 +359,8 @@ impl Op {
             GetGlobalLong(index) => constant_instr!("GET_GLOBAL_LONG", index),
             DefineGlobal(index) => constant_instr!("DEF_GLOBAL", index),
             DefineGlobalLong(index) => constant_instr!("DEF_GLOBAL_LONG", index),
+            SetGlobal(index) => constant_instr!("SET_GLOBAL", index),
+            SetGlobalLong(index) => constant_instr!("SET_GLOBAL_LONG", index),
             Equal => write!(f, "EQUAL"),
             Greater => write!(f, "GREATER"),
             Less => write!(f, "LESS"),
