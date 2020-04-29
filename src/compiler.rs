@@ -27,15 +27,18 @@ impl fmt::Display for CompileError {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum CompileErrorType {
     // compilation
     UnexpectedChar,
     UnterminatedString,
     MissingRightParen,
+    MissingRightBrace(&'static str),
     MissingPrefixExpr,
     MissingSemi,
     MissingVarName,
+    DuplicateLocal(String),
+    ReadBeforeDefined(String),
     ExpectedEOF,
 }
 
@@ -47,23 +50,34 @@ impl fmt::Display for CompileErrorType {
             UnexpectedChar => write!(f, "unexpected character"),
             UnterminatedString => write!(f, "unterminated string"),
             MissingRightParen => write!(f, "expected ')'"),
+            MissingRightBrace(location) => write!(f, "expected '}}' {}", location),
             MissingPrefixExpr => write!(f, "expected expression"),
             MissingSemi => write!(f, "expected ';' after statement"),
             MissingVarName => write!(f, "expect variable name"),
+            DuplicateLocal(who) => write!(f, "variable `{}` already declared in this scope", who),
+            ReadBeforeDefined(who) => {
+                write!(f, "tried to use variable `{}` in its own initializer", who)
+            }
             ExpectedEOF => write!(f, "expected end of input"),
         }
     }
+}
+
+macro_rules! short_or_long {
+    ( $value: expr; $short: ident <> $long: ident ) => {{
+        if $value > 255 {
+            Op::$long($value as u16)
+        } else {
+            Op::$short($value as u8)
+        }
+    }};
 }
 
 macro_rules! emit {
     (const $c: ident : $short: ident / $long: ident, $val: expr ) => {{
         let index = $c.chunk.add_constant($val);
         $c.chunk.write(
-            if index < 256 {
-                Op::$short(index as u8)
-            } else {
-                Op::$long(index as u16)
-            },
+            short_or_long!(index; $short <> $long),
             $c.parser.line
         );
     }};
@@ -81,6 +95,8 @@ pub(crate) struct Compiler<'compile> {
     parser: Parser<'compile>,
     errors: Vec<CompileError>,
     chunk: Chunk,
+    locals: Vec<(&'compile str, Option<usize>)>,
+    scope_depth: usize,
 }
 
 type ParseFn<'compile> = fn(&mut Compiler<'compile>, bool);
@@ -98,6 +114,8 @@ impl<'compile> Compiler<'compile> {
             },
             errors: Vec::new(),
             chunk: Chunk::new(""),
+            locals: Vec::new(),
+            scope_depth: 0,
         };
 
         compiler.advance();
@@ -157,14 +175,17 @@ impl<'compile> Compiler<'compile> {
     fn error_at(&mut self, token: MaybeToken<'compile>, err: CompileErrorType) {
         if !self.parser.panic_mode {
             self.parser.panic_mode = true;
-            self.errors.push(CompileError {
+
+            let new_err = CompileError {
                 err,
                 line: self.parser.line,
                 text: token
                     .map(Result::unwrap)
                     .map(|Token { text, .. }| text.to_string()),
-            });
-            log::error!("{}", err);
+            };
+
+            log::error!("{}", new_err);
+            self.errors.push(new_err);
         }
     }
 
@@ -211,10 +232,48 @@ impl<'compile> Compiler<'compile> {
     fn parse_variable(&mut self, err: CompileErrorType) -> usize {
         self.consume(TokenType::Identifier, err);
         if let Some(Ok(Token { text, .. })) = self.parser.previous {
-            self.chunk.add_constant(Value::r#String(text.to_string()))
+            self.declare_variable(text);
+
+            // globals only
+            if self.scope_depth == 0 {
+                self.chunk.add_constant(Value::r#String(text.to_string()))
+            } else {
+                0
+            }
         } else {
             unreachable!();
         }
+    }
+
+    fn declare_variable(&mut self, name: &'compile str) {
+        if self.scope_depth == 0 {
+            return;
+        }
+
+        // check for shadowing in current scope only
+        if self
+            .locals
+            .iter()
+            .rev()
+            .take_while(|(_, other_depth)| {
+                if let Some(d) = other_depth {
+                    if *d < self.scope_depth {
+                        return false;
+                    }
+                }
+
+                true
+            })
+            .any(|(n, _)| *n == name)
+        {
+            self.error(CompileErrorType::DuplicateLocal(name.to_string()));
+        }
+
+        self.add_local(name);
+    }
+
+    fn add_local(&mut self, name: &'compile str) {
+        self.locals.push((name, None));
     }
 
     fn var_declaration(&mut self) {
@@ -229,21 +288,69 @@ impl<'compile> Compiler<'compile> {
 
         self.consume(TokenType::Semi, CompileErrorType::MissingSemi);
 
-        emit!(
-            self,
-            if var_const < 256 {
-                Op::DefineGlobal(var_const as u8)
-            } else {
-                Op::DefineGlobalLong(var_const as u16)
-            }
-        );
+        // globals only
+        if self.scope_depth == 0 {
+            emit!(
+                self,
+                short_or_long!(var_const; DefineGlobal <> DefineGlobalLong)
+            );
+        } else {
+            // mark as initialized
+            let last_idx = self.locals.len() - 1;
+            self.locals[last_idx].1 = Some(self.scope_depth);
+        }
     }
 
     fn statement(&mut self) {
         match self.parser.current_type() {
             Some(TokenType::Print) => self.print_statement(),
+            Some(TokenType::LeftBrace) => {
+                self.advance();
+                self.begin_scope();
+                self.block();
+                self.end_scope();
+            }
             _ => self.expression_statement(),
         }
+    }
+
+    fn begin_scope(&mut self) {
+        self.scope_depth += 1;
+    }
+
+    fn end_scope(&mut self) {
+        self.scope_depth -= 1;
+
+        let mut num_to_pop = 0;
+        for (_, depth) in self.locals.iter().rev() {
+            if let Some(d) = depth {
+                if *d <= self.scope_depth {
+                    break;
+                }
+            }
+
+            num_to_pop += 1;
+        }
+
+        if num_to_pop > 0 {
+            self.locals.truncate(self.locals.len() - num_to_pop);
+            emit!(self, Op::PopN(num_to_pop as u8));
+        }
+    }
+
+    fn block(&mut self) {
+        while let Some(Ok(token)) = &self.parser.current {
+            if let TokenType::RightBrace = token.r#type {
+                break;
+            }
+
+            self.declaration();
+        }
+
+        self.consume(
+            TokenType::RightBrace,
+            CompileErrorType::MissingRightBrace("after block"),
+        );
     }
 
     fn print_statement(&mut self) {
@@ -356,24 +463,49 @@ impl<'compile> Compiler<'compile> {
     }
 
     fn variable(&mut self, _: bool) {
-        let token = if let Some(Ok(token)) = &self.parser.previous {
-            token.clone()
+        let token_text = if let Some(Ok(Token { text, .. })) = &self.parser.previous {
+            (*text).clone()
         } else {
             unreachable!();
         };
 
-        self.named_variable(&token);
+        self.named_variable(token_text);
     }
 
-    fn named_variable(&mut self, Token { text, .. }: &Token) {
-        let value = Value::r#String(text.to_string());
+    fn named_variable(&mut self, name: &str) {
+        let resolved_index = self.resolve_local(name);
+        let value_maker = || Value::r#String(name.to_string());
+
+        // "Set" expression
         if let Some(TokenType::Equal) = self.parser.current_type() {
             self.advance();
             self.expression();
-            emit!(const self: SetGlobal / SetGlobalLong, value);
+
+            if let Some(idx) = resolved_index {
+                emit!(self, short_or_long!(idx; SetLocal <> SetLocalLong));
+            } else {
+                emit!(const self: SetGlobal / SetGlobalLong, value_maker());
+            }
+        // "Get" expression
+        } else if let Some(idx) = resolved_index {
+            emit!(self, short_or_long!(idx; GetLocal <> GetLocalLong));
         } else {
-            emit!(const self: GetGlobal / GetGlobalLong, value);
+            emit!(const self: GetGlobal / GetGlobalLong, value_maker());
         }
+    }
+
+    fn resolve_local(&mut self, query: &str) -> Option<usize> {
+        for (index, (name, maybe_depth)) in self.locals.iter().enumerate().rev() {
+            if *name == query {
+                if maybe_depth.is_none() {
+                    self.error(CompileErrorType::ReadBeforeDefined(query.to_string()));
+                }
+
+                return Some(index);
+            }
+        }
+
+        None
     }
 
     fn get_rule(sigil: TokenType) -> Rule<'compile> {
@@ -463,7 +595,7 @@ enum Precedence {
 }
 
 impl<'a, 'b> Precedence {
-    fn next(&self) -> Self {
+    fn next(self) -> Self {
         match self {
             Self::None => Self::Assignment,
             Self::Assignment => Self::Or,

@@ -103,8 +103,10 @@ impl<'a, 'b> VM<'a> {
         #[cfg(feature = "trace-compilation")]
         log::debug!("\n{}", chunk);
 
-        self.run(chunk)
-            .map_err(|err| vec![Box::new(err) as Box<dyn Error>])
+        self.run(chunk).map_err(|err| {
+            log::error!("{}", err);
+            vec![Box::new(err) as Box<dyn Error>]
+        })
     }
 
     fn run(&mut self, chunk: Chunk) -> Result<(), RuntimeError> {
@@ -148,7 +150,7 @@ impl<'a, 'b> VM<'a> {
             ($index: expr) => {{
                 let var_name = read_string!($index);
                 let value = self.peek(0)?.clone();
-                if let None = self.globals.insert(var_name.clone(), value) {
+                if self.globals.insert(var_name.clone(), value).is_none() {
                     self.globals.remove(var_name);
                     return Err(RuntimeError::UndefinedGlobal(var_name.to_string()));
                 }
@@ -158,8 +160,7 @@ impl<'a, 'b> VM<'a> {
 
         macro_rules! binary_op_body {
             ( $op:tt, $variant:ident ) => {
-                if let (Value::Number(b), Value::Number(a)) =
-                    (self.pop()?, self.pop()?) {
+                if let (Value::Number(a), Value::Number(b)) = self.pop_pair()? {
                     self.stack.push(Value::$variant(a $op b));
                 }
             };
@@ -208,14 +209,35 @@ impl<'a, 'b> VM<'a> {
                 Pop => {
                     self.pop()?;
                 }
+                PopN(count) => {
+                    self.pop_many(*count as usize)?;
+                }
                 GetGlobal(index) => get_global!(index),
                 GetGlobalLong(index) => get_global!(index),
                 DefineGlobal(index) => define_global!(index),
                 DefineGlobalLong(index) => define_global!(index),
                 SetGlobal(index) => set_global!(index),
                 SetGlobalLong(index) => set_global!(index),
+                GetLocal(index) => self.stack.push(
+                    self.stack
+                        .get(*index as usize)
+                        .ok_or(RuntimeError::StackEmpty)?
+                        .clone(),
+                ),
+                GetLocalLong(index) => self.stack.push(
+                    self.stack
+                        .get(*index as usize)
+                        .ok_or(RuntimeError::StackEmpty)?
+                        .clone(),
+                ),
+                SetLocal(index) => {
+                    self.stack[*index as usize] = self.peek(0)?.clone();
+                }
+                SetLocalLong(index) => {
+                    self.stack[*index as usize] = self.peek(0)?.clone();
+                }
                 Equal => {
-                    let (b, a) = (self.pop()?, self.pop()?);
+                    let (a, b) = self.pop_pair()?;
                     self.stack.push(Value::Boolean(b == a));
                 }
                 Greater => binary_op!(>, Boolean),
@@ -225,8 +247,7 @@ impl<'a, 'b> VM<'a> {
                         binary_op_body!(+, Number);
                     }
                     (Value::r#String(_), Value::r#String(_)) => {
-                        if let (Value::r#String(b), Value::r#String(a)) = (self.pop()?, self.pop()?)
-                        {
+                        if let (Value::r#String(a), Value::r#String(b)) = self.pop_pair()? {
                             self.stack.push(Value::r#String(a + &b));
                         }
                     }
@@ -258,6 +279,20 @@ impl<'a, 'b> VM<'a> {
 
     fn pop(&mut self) -> Result<Value, RuntimeError> {
         self.stack.pop().ok_or(RuntimeError::StackEmpty)
+    }
+
+    fn pop_pair(&mut self) -> Result<(Value, Value), RuntimeError> {
+        let b = self.pop()?;
+        let a = self.pop()?;
+        Ok((a, b))
+    }
+
+    fn pop_many(&mut self, count: usize) -> Result<Vec<Value>, RuntimeError> {
+        if self.stack.len() < count {
+            Err(RuntimeError::StackEmpty)
+        } else {
+            Ok(self.stack.split_off(self.stack.len() - count))
+        }
     }
 
     fn peek(&self, distance: usize) -> Result<&Value, RuntimeError> {
@@ -315,12 +350,17 @@ enum Op {
 
     // actions
     Pop,
+    PopN(u8),
     GetGlobal(u8),
     GetGlobalLong(u16),
     DefineGlobal(u8),
     DefineGlobalLong(u16),
     SetGlobal(u8),
     SetGlobalLong(u16),
+    GetLocal(u8),
+    GetLocalLong(u16),
+    SetLocal(u8),
+    SetLocalLong(u16),
 
     // operators
     Equal,
@@ -355,12 +395,17 @@ impl Op {
             True => write!(f, "TRUE"),
             False => write!(f, "FALSE"),
             Pop => write!(f, "POP"),
+            PopN(count) => write!(f, "POP_N\t{}", count),
             GetGlobal(index) => constant_instr!("GET_GLOBAL", index),
             GetGlobalLong(index) => constant_instr!("GET_GLOBAL_LONG", index),
             DefineGlobal(index) => constant_instr!("DEF_GLOBAL", index),
             DefineGlobalLong(index) => constant_instr!("DEF_GLOBAL_LONG", index),
             SetGlobal(index) => constant_instr!("SET_GLOBAL", index),
             SetGlobalLong(index) => constant_instr!("SET_GLOBAL_LONG", index),
+            GetLocal(index) => write!(f, "GET_LOCAL\t{}", index),
+            GetLocalLong(index) => write!(f, "GET_LOCAL_LONG\t{}", index),
+            SetLocal(index) => write!(f, "SET_LOCAL\t{}", index),
+            SetLocalLong(index) => write!(f, "SET_LOCAL_LONG\t{}", index),
             Equal => write!(f, "EQUAL"),
             Greater => write!(f, "GREATER"),
             Less => write!(f, "LESS"),
