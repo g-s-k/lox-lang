@@ -6,6 +6,9 @@ use std::{
     time::Instant,
 };
 
+#[global_allocator]
+static GLOBAL: jemallocator::Jemalloc = jemallocator::Jemalloc;
+
 use {
     clap::Clap,
     lazy_static::{initialize, lazy_static},

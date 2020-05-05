@@ -1,4 +1,4 @@
-use std::{collections::HashMap, error, fmt, io::Write, mem};
+use std::{collections::HashMap, error, fmt, io::Write};
 
 use super::{Chunk, Compiler, Error, Fun, Op, Value};
 
@@ -77,8 +77,6 @@ impl CallFrame {
     }
 }
 
-const STACK_SIZE: u16 = 1024;
-
 /// The Lox virtual machine.
 ///
 /// ### Example
@@ -90,16 +88,10 @@ const STACK_SIZE: u16 = 1024;
 /// ```
 pub struct VM<'writer> {
     stdout: Option<&'writer mut dyn Write>,
-
-    stack: [Value; STACK_SIZE as usize],
-    stack_top: u16,
-    frames: [CallFrame; STACK_SIZE as usize],
-    frame_count: u16,
-
+    stack: Vec<Value>,
+    frames: Vec<CallFrame>,
     globals: HashMap<Box<str>, Value>,
 }
-
-const NIL: Value = Value::Nil;
 
 impl Default for VM<'_> {
     /// The `VM` constructor.
@@ -112,12 +104,8 @@ impl Default for VM<'_> {
     fn default() -> Self {
         VM {
             stdout: None,
-
-            stack: [NIL; STACK_SIZE as usize],
-            stack_top: 0,
-            frames: [CallFrame::default(); STACK_SIZE as usize],
-            frame_count: 0,
-
+            stack: Vec::new(),
+            frames: Vec::new(),
             globals: HashMap::new(),
         }
     }
@@ -134,14 +122,14 @@ impl<'writer, 'source> VM<'writer> {
         let fun = Compiler::compile(source.as_ref())
             .map_err(|errs| errs.into_iter().map(Into::into).collect::<Vec<_>>())?;
 
-        let _ = self.push(Value::Fun(Box::into_raw(Box::new(fun))));
+        let _ = self.stack.push(Value::Fun(Box::into_raw(Box::new(fun))));
         let _ = self.call_value(0);
 
         self.run().map_err(|err| {
             let mut line_no = None;
             let mut backtrace = format!("{}", err);
 
-            for frame in self.frames[0..self.frame_count as usize].iter().rev() {
+            for frame in self.frames.iter().rev() {
                 let function = unsafe { &(*frame.func).name };
                 let (line, _) = frame.chunk().find_line(frame.inst);
 
@@ -162,7 +150,7 @@ impl<'writer, 'source> VM<'writer> {
         macro_rules! binary_op_body {
             ($op: tt, $variant: ident) => {
                 if let (Value::Number(a), Value::Number(b)) = self.pop_pair()? {
-                    self.push(Value::$variant(a $op b))?;
+                    self.stack.push(Value::$variant(a $op b));
                 }
             };
         }
@@ -185,13 +173,14 @@ impl<'writer, 'source> VM<'writer> {
                 // print stack before operation
                 log::debug!(
                     "          {}",
-                    self.stack[..self.stack_top as usize]
+                    self.stack
                         .iter()
                         .map(|v| format!("[ {} ]", v))
                         .collect::<String>()
                 );
 
                 // print operation and arguments
+                let frame = self.frame();
                 log::debug!("{:1$x}", frame.chunk(), frame.inst);
             }
 
@@ -199,16 +188,16 @@ impl<'writer, 'source> VM<'writer> {
 
             match instruction {
                 Op::Constant(index) => {
-                    self.push(self.read_constant(index).clone())?;
+                    self.stack.push(self.read_constant(index).clone());
                 }
                 Op::ConstantLong(index) => {
-                    self.push(self.read_constant(index).clone())?;
+                    self.stack.push(self.read_constant(index).clone());
                 }
-                Op::Nil => self.push(Value::Nil)?,
-                Op::True => self.push(Value::Boolean(true))?,
-                Op::False => self.push(Value::Boolean(false))?,
+                Op::Nil => self.stack.push(Value::Nil),
+                Op::True => self.stack.push(Value::Boolean(true)),
+                Op::False => self.stack.push(Value::Boolean(false)),
                 Op::Pop => {
-                    self.pop()?;
+                    self.stack.pop();
                 }
                 Op::PopN(count) => {
                     self.pop_many(count.into())?;
@@ -225,7 +214,7 @@ impl<'writer, 'source> VM<'writer> {
                 Op::SetLocalLong(index) => self.set_local(index)?,
                 Op::Equal => {
                     let (a, b) = self.pop_pair()?;
-                    self.push(Value::Boolean(b == a))?;
+                    self.stack.push(Value::Boolean(b == a));
                 }
                 Op::Greater => binary_op!(>, Boolean),
                 Op::Less => binary_op!(<, Boolean),
@@ -237,7 +226,7 @@ impl<'writer, 'source> VM<'writer> {
                         if let (Value::r#String(a), Value::r#String(b)) = self.pop_pair()? {
                             let mut a = a.into_string();
                             a.push_str(&b);
-                            self.push(Value::r#String(a.into_boxed_str()))?;
+                            self.stack.push(Value::r#String(a.into_boxed_str()));
                         }
                     }
                     _ => return Err(RuntimeError::ArgumentTypes),
@@ -246,16 +235,19 @@ impl<'writer, 'source> VM<'writer> {
                 Op::Multiply => binary_op!(*, Number),
                 Op::Divide => binary_op!(/, Number),
                 Op::Not => {
-                    let val = Value::Boolean(self.pop()?.is_falsey());
-                    self.push(val)?;
+                    if let Some(val) = self.stack.pop() {
+                        self.stack.push(Value::Boolean(val.is_falsey()));
+                    }
                 }
                 Op::Negate => {
-                    let value = self.pop()?;
-                    self.push(value.negate()?)?;
+                    if let Some(value) = self.stack.pop() {
+                        self.stack.push(value.negate()?);
+                    }
                 }
                 Op::Print => {
-                    let val = self.pop()?;
-                    self.print(format_args!("{}\n", val));
+                    if let Some(val) = self.stack.pop() {
+                        self.print(format_args!("{}\n", val));
+                    }
                 }
                 Op::JumpIfFalse(distance) => {
                     if self.peek(0)?.is_falsey() {
@@ -269,16 +261,16 @@ impl<'writer, 'source> VM<'writer> {
                 }
                 Op::Return => {
                     let base_ptr = self.frame().base;
-                    let result = self.pop()?;
+                    let result = self.stack.pop().ok_or(RuntimeError::StackEmpty)?;
 
-                    self.frame_count -= 1;
-                    if self.frame_count == 0 {
-                        self.pop()?;
+                    self.frames.pop();
+                    if self.frames.is_empty() {
+                        self.stack.pop();
                         break;
                     }
 
-                    self.stack_top = base_ptr;
-                    self.push(result)?;
+                    self.stack.truncate(base_ptr as usize);
+                    self.stack.push(result);
                 }
             }
         }
@@ -286,25 +278,17 @@ impl<'writer, 'source> VM<'writer> {
         Ok(())
     }
 
-    fn frame_index(&self) -> Option<usize> {
-        self.frame_count.checked_sub(1).map(Into::into)
-    }
-
     fn frame(&self) -> &CallFrame {
-        if let Some(idx) = self.frame_index() {
-            if let Some(frame) = self.frames.get(idx) {
-                return frame;
-            }
+        if let Some(frame) = self.frames.last() {
+            return frame;
         }
 
         unreachable!("Current call frame not found.")
     }
 
     fn frame_mut(&mut self) -> &mut CallFrame {
-        if let Some(idx) = self.frame_index() {
-            if let Some(frame) = self.frames.get_mut(idx) {
-                return frame;
-            }
+        if let Some(frame) = self.frames.last_mut() {
+            return frame;
         }
 
         unreachable!("Current call frame not found.")
@@ -321,9 +305,7 @@ impl<'writer, 'source> VM<'writer> {
 
     fn read_string<T: Into<usize> + fmt::Display + Copy>(&self, index: T) -> &str {
         match self.read_constant(index) {
-            Value::r#String(s) => {
-                s
-            }
+            Value::r#String(s) => s,
             c =>
             unreachable!(
                 "Invariant violation: tried to load a string value from the constant table at index {}; found non-string value {}",
@@ -336,11 +318,13 @@ impl<'writer, 'source> VM<'writer> {
         &mut self,
         index: T,
     ) -> Result<(), RuntimeError> {
-        let value = self.peek(0)?.clone();
-        let var_name = self.read_string(index).to_string().into_boxed_str();
-        self.globals.insert(var_name, value);
-        self.pop()?;
-        Ok(())
+        if let Some(value) = self.stack.pop() {
+            let var_name = self.read_string(index).to_string().into_boxed_str();
+            self.globals.insert(var_name, value);
+            Ok(())
+        } else {
+            Err(RuntimeError::StackEmpty)
+        }
     }
 
     fn fetch_global<T: Into<usize> + fmt::Display + Copy>(
@@ -349,7 +333,7 @@ impl<'writer, 'source> VM<'writer> {
     ) -> Result<(), RuntimeError> {
         let var_name = self.read_string(index);
         if let Some(value) = self.globals.get(var_name).cloned() {
-            self.push(value)?;
+            self.stack.push(value);
             Ok(())
         } else {
             Err(RuntimeError::UndefinedGlobal(var_name.to_string()))
@@ -374,7 +358,8 @@ impl<'writer, 'source> VM<'writer> {
         let base_ptr = usize::from(self.frame().base);
 
         if let Some(val) = self.stack.get(index.into() + base_ptr).cloned() {
-            self.push(val)
+            self.stack.push(val);
+            Ok(())
         } else {
             Err(RuntimeError::StackEmpty)
         }
@@ -391,46 +376,19 @@ impl<'writer, 'source> VM<'writer> {
         Ok(())
     }
 
-    fn push(&mut self, value: Value) -> Result<(), RuntimeError> {
-        if self.stack_top == STACK_SIZE {
-            Err(RuntimeError::ValueStackOverflow)
-        } else if let Some(el) = self.stack.get_mut(self.stack_top as usize) {
-            *el = value;
-            self.stack_top += 1;
-            Ok(())
-        } else {
-            Err(RuntimeError::StackEmpty)
-        }
-    }
-
-    fn pop(&mut self) -> Result<Value, RuntimeError> {
-        if let Some(new_top) = self.stack_top.checked_sub(1) {
-            if let Some(el) = self.stack.get_mut(new_top as usize) {
-                self.stack_top = new_top;
-                return Ok(mem::replace(el, Value::Nil));
+    fn pop_pair(&mut self) -> Result<(Value, Value), RuntimeError> {
+        if let Some(b) = self.stack.pop() {
+            if let Some(a) = self.stack.pop() {
+                return Ok((a, b));
             }
         }
 
         Err(RuntimeError::StackEmpty)
     }
 
-    fn pop_pair(&mut self) -> Result<(Value, Value), RuntimeError> {
-        if let Some(new_top) = self.stack_top.checked_sub(2) {
-            let old_top = mem::replace(&mut self.stack_top, new_top);
-
-            let mut a_and_b = [NIL, NIL];
-            a_and_b.swap_with_slice(&mut self.stack[new_top as usize..old_top as usize]);
-
-            let [a, b] = a_and_b;
-            Ok((a, b))
-        } else {
-            Err(RuntimeError::StackEmpty)
-        }
-    }
-
     fn pop_many(&mut self, count: u16) -> Result<(), RuntimeError> {
-        if let Some(new_top) = self.stack_top.checked_sub(count) {
-            self.stack_top = new_top;
+        if let Some(new_len) = self.stack.len().checked_sub(count as usize) {
+            self.stack.truncate(new_len);
             Ok(())
         } else {
             Err(RuntimeError::StackEmpty)
@@ -438,7 +396,7 @@ impl<'writer, 'source> VM<'writer> {
     }
 
     fn peek(&self, distance: usize) -> Result<&Value, RuntimeError> {
-        if let Some(idx) = usize::from(self.stack_top).checked_sub(distance + 1) {
+        if let Some(idx) = self.stack.len().checked_sub(distance + 1) {
             if let Some(val) = self.stack.get(idx) {
                 return Ok(val);
             }
@@ -448,19 +406,19 @@ impl<'writer, 'source> VM<'writer> {
     }
 
     fn call_value(&mut self, arg_count: u8) -> Result<(), RuntimeError> {
-        match self.peek(arg_count as usize)?.clone() {
+        match *self.peek(arg_count as usize)? {
             Value::Fun(f) => self.call(unsafe { &*f }, arg_count),
             Value::NativeFun(f) => {
                 let from = self
-                    .stack_top
+                    .stack
+                    .len()
                     .checked_sub(arg_count.into())
-                    .ok_or(RuntimeError::StackEmpty)? as usize;
-                let to = self.stack_top as usize;
-                let stack_slice = &mut self.stack[from..to];
+                    .ok_or(RuntimeError::StackEmpty)?;
 
-                let result = f(stack_slice);
-                self.pop_many(arg_count.into())?;
-                self.push(result.map_err(RuntimeError::NativeFunError)?)?;
+                let result = f(&self.stack[from..]);
+                self.pop_many(u16::from(arg_count) + 1)?;
+                self.stack
+                    .push(result.map_err(RuntimeError::NativeFunError)?);
 
                 Ok(())
             }
@@ -471,14 +429,10 @@ impl<'writer, 'source> VM<'writer> {
     fn call(&mut self, callee: &Fun, arg_count: u8) -> Result<(), RuntimeError> {
         if arg_count != callee.arity {
             Err(RuntimeError::ArityMismatch(callee.arity, arg_count))
-        } else if self.frame_count == STACK_SIZE {
-            Err(RuntimeError::CallStackOverflow)
-        } else if let Some(el) = self.frames.get_mut(self.frame_count as usize) {
-            *el = CallFrame::new(callee, self.stack_top);
-            self.frame_count += 1;
-            Ok(())
         } else {
-            Err(RuntimeError::CallStackOverflow)
+            self.frames
+                .push(CallFrame::new(callee, self.stack.len() as u16));
+            Ok(())
         }
     }
 
