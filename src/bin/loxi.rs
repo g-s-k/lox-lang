@@ -1,13 +1,15 @@
 use std::{
-    fs,
+    error, fs,
     io::{self, BufRead, Write},
     path::{Path, PathBuf},
     process,
+    time::Instant,
 };
 
 use {
     clap::Clap,
-    lox_lang::{Error, ErrorCategory, VM},
+    lazy_static::{initialize, lazy_static},
+    lox_lang::{Error, ErrorCategory, Value, VM},
     simplelog::{ConfigBuilder, LevelFilter, SimpleLogger},
 };
 
@@ -42,7 +44,7 @@ fn main() {
 }
 
 fn repl() {
-    let mut vm = VM::default();
+    let mut vm = vm_with_global();
     let mut buffer = String::new();
     loop {
         buffer.clear();
@@ -65,7 +67,7 @@ fn repl() {
     }
 }
 
-fn run_file(path: &Path) -> Result<(), Box<dyn Error>> {
+fn run_file(path: &Path) -> Result<(), Error> {
     let source = match fs::read_to_string(path) {
         Ok(code) => code,
         Err(e) => {
@@ -74,7 +76,22 @@ fn run_file(path: &Path) -> Result<(), Box<dyn Error>> {
         }
     };
 
-    VM::default()
+    vm_with_global()
         .interpret(source)
         .map_err(|mut errs| errs.pop().unwrap())
+}
+
+fn vm_with_global() -> VM<'static> {
+    let mut vm = VM::default();
+    initialize(&START_TIME);
+    vm.define_global("clock", Value::NativeFun(clock_native));
+    vm
+}
+
+lazy_static! {
+    static ref START_TIME: Instant = Instant::now();
+}
+
+fn clock_native(_: &[Value]) -> Result<Value, Box<dyn error::Error>> {
+    Ok(Value::Number(START_TIME.elapsed().as_secs_f64()))
 }

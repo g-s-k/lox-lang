@@ -2,12 +2,13 @@ use std::{convert::TryInto, fmt};
 
 use super::{CompileErrorType, Op, Value};
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct LineRecord {
     line: usize,
     count: usize,
 }
 
+#[derive(Clone, Debug)]
 pub(crate) struct Chunk {
     name: String,
     pub constants: Vec<Value>,
@@ -68,7 +69,7 @@ impl Chunk {
         self.code[index].disassemble(self, f)
     }
 
-    fn find_line(&self, instruction_index: usize) -> (usize, bool) {
+    pub fn find_line(&self, instruction_index: usize) -> (usize, bool) {
         let mut line_num = 1;
         let mut is_first = true;
 

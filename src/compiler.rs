@@ -1,21 +1,17 @@
-use std::{convert::TryInto, fmt};
+use std::{convert::TryInto, error, fmt, mem};
 
-use super::{Chunk, Error, ErrorCategory, Op, ScanError, Scanner, Token, TokenType, Value};
+use super::{Fun, Op, ScanError, Scanner, Token, TokenType, Value};
 
 type MaybeToken<'a> = Option<Result<Token<'a>, ScanError>>;
 
 #[derive(Debug)]
 pub(crate) struct CompileError {
     pub err: CompileErrorType,
-    line: usize,
+    pub line: usize,
     text: Option<String>,
 }
 
-impl Error for CompileError {
-    fn category(&self) -> ErrorCategory {
-        ErrorCategory::Compilation
-    }
-}
+impl error::Error for CompileError {}
 
 impl fmt::Display for CompileError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -34,13 +30,18 @@ pub enum CompileErrorType {
     UnterminatedString,
     MissingLeftParen(&'static str),
     MissingRightParen(&'static str),
+    MissingLeftBrace(&'static str),
     MissingRightBrace(&'static str),
     MissingPrefixExpr,
     MissingSemi,
     MissingVarName,
+    MissingFunName,
+    MissingParamName,
+    TooManyParams,
     DuplicateLocal(String),
     ReadBeforeDefined(String),
     JumpTooLarge(usize),
+    TopLevelReturn,
     ExpectedEOF,
 }
 
@@ -53,10 +54,14 @@ impl fmt::Display for CompileErrorType {
             UnterminatedString => write!(f, "unterminated string"),
             MissingLeftParen(location) => write!(f, "expected '(' {}", location),
             MissingRightParen(location) => write!(f, "expected ')' {}", location),
+            MissingLeftBrace(location) => write!(f, "expected '{{' {}", location),
             MissingRightBrace(location) => write!(f, "expected '}}' {}", location),
             MissingPrefixExpr => write!(f, "expected expression"),
             MissingSemi => write!(f, "expected ';' after statement"),
             MissingVarName => write!(f, "expect variable name"),
+            MissingFunName => write!(f, "expect function name"),
+            MissingParamName => write!(f, "expect parameter name"),
+            TooManyParams => write!(f, "cannot exceed 255 parameters"),
             DuplicateLocal(who) => write!(f, "variable `{}` already declared in this scope", who),
             ReadBeforeDefined(who) => {
                 write!(f, "tried to use variable `{}` in its own initializer", who)
@@ -67,6 +72,7 @@ impl fmt::Display for CompileErrorType {
                 distance,
                 u16::MAX
             ),
+            TopLevelReturn => write!(f, "return statement outside a function body"),
             ExpectedEOF => write!(f, "expected end of input"),
         }
     }
@@ -83,19 +89,19 @@ macro_rules! short_or_long {
 
 macro_rules! emit {
     (const $c: ident : $short: ident / $long: ident, $val: expr ) => {{
-        let index = $c.chunk.add_constant($val);
-        $c.chunk.write(
+        let index = $c.fun.inner.chunk.add_constant($val);
+        $c.fun.inner.chunk.write(
             short_or_long!(index; $short <> $long),
             $c.parser.line
         );
     }};
 
     (jump $c: ident : $variant: ident) => {{
-        $c.chunk.write(Op::$variant(u16::MAX), $c.parser.line)
+        $c.fun.inner.chunk.write(Op::$variant(u16::MAX), $c.parser.line)
     }};
 
     (loop $c: ident : $loop_start: expr) => {{
-        let loop_end = $c.chunk.code.len();
+        let loop_end = $c.fun.inner.chunk.code.len();
         let difference = loop_end - $loop_start + 1;
 
         let difference = match difference.try_into() {
@@ -106,28 +112,43 @@ macro_rules! emit {
             Ok(d) => d,
         };
 
-        $c.chunk.write(Op::Loop(difference), $c.parser.line);
+        $c.fun.inner.chunk.write(Op::Loop(difference), $c.parser.line);
     }};
 
     ( $c:ident, $( $op:expr ),* ) => {{
-        $( $c.chunk.write($op, $c.parser.line); )*
+        $( $c.fun.inner.chunk.write($op, $c.parser.line); )*
     }};
+}
+
+enum FunType {
+    Script,
+    Function,
+}
+
+struct FunWrapper<'compile> {
+    enclosing: Option<Box<FunWrapper<'compile>>>,
+    inner: Fun,
+    r#type: FunType,
+    locals: Vec<(&'compile str, Option<usize>)>,
+    scope_depth: usize,
 }
 
 pub(crate) struct Compiler<'compile> {
     scanner: Scanner<'compile>,
     parser: Parser<'compile>,
     errors: Vec<CompileError>,
-    chunk: Chunk,
-    locals: Vec<(&'compile str, Option<usize>)>,
-    scope_depth: usize,
+    fun: Box<FunWrapper<'compile>>,
 }
 
 type ParseFn<'compile> = fn(&mut Compiler<'compile>, bool);
-type Rule<'a> = (Option<ParseFn<'a>>, Option<ParseFn<'a>>, Precedence);
+type Rule<'compile> = (
+    Option<ParseFn<'compile>>,
+    Option<ParseFn<'compile>>,
+    Precedence,
+);
 
 impl<'compile> Compiler<'compile> {
-    pub fn compile(source: &'compile str) -> Result<Chunk, Vec<CompileError>> {
+    pub fn compile(source: &'compile str) -> Result<Fun, Vec<CompileError>> {
         let mut compiler = Self {
             scanner: Scanner::new(source),
             parser: Parser {
@@ -137,9 +158,13 @@ impl<'compile> Compiler<'compile> {
                 panic_mode: false,
             },
             errors: Vec::new(),
-            chunk: Chunk::new(""),
-            locals: Vec::new(),
-            scope_depth: 0,
+            fun: Box::new(FunWrapper {
+                enclosing: None,
+                inner: Fun::new("script", 0),
+                r#type: FunType::Script,
+                locals: vec![("", Some(0))],
+                scope_depth: 0,
+            }),
         };
 
         compiler.advance();
@@ -152,13 +177,20 @@ impl<'compile> Compiler<'compile> {
             compiler.error_at_current(CompileErrorType::ExpectedEOF);
         }
 
-        emit!(compiler, Op::Return);
+        compiler.end_function();
 
         if compiler.errors.is_empty() {
-            Ok(compiler.chunk)
+            Ok(compiler.fun.inner)
         } else {
             Err(compiler.errors)
         }
+    }
+
+    fn end_function(&mut self) {
+        emit!(self, Op::Nil, Op::Return);
+
+        #[cfg(feature = "trace-compilation")]
+        log::debug!("\n{}", self.fun.inner.chunk);
     }
 
     fn advance(&mut self) {
@@ -241,6 +273,10 @@ impl<'compile> Compiler<'compile> {
 
     fn declaration(&mut self) {
         match self.parser.current_type() {
+            Some(TokenType::Fun) => {
+                self.advance();
+                self.fun_declaration();
+            }
             Some(TokenType::Var) => {
                 self.advance();
                 self.var_declaration();
@@ -253,14 +289,104 @@ impl<'compile> Compiler<'compile> {
         }
     }
 
+    fn fun_declaration(&mut self) {
+        let name_idx = self.parse_variable(CompileErrorType::MissingFunName);
+        self.mark_last_local_initialized();
+        self.function(FunType::Function);
+        self.define_variable(name_idx);
+    }
+
+    fn function(&mut self, r#type: FunType) {
+        // insert at head of list
+        let fun_name = match self.parser.previous {
+            Some(Ok(Token {
+                r#type: TokenType::Identifier,
+                text,
+                ..
+            })) => text.to_string().into_boxed_str(),
+            _ => unreachable!("cannot compile a function without a name"),
+        };
+        let old_fun_wrapper = mem::replace(
+            &mut self.fun,
+            Box::new(FunWrapper {
+                enclosing: None,
+                inner: Fun::new(fun_name, 0),
+                r#type,
+                locals: vec![("", Some(0))],
+                scope_depth: 0,
+            }),
+        );
+        self.fun.enclosing = Some(old_fun_wrapper);
+
+        self.begin_scope();
+
+        // (
+        self.consume(
+            TokenType::LeftParen,
+            CompileErrorType::MissingLeftParen("after function name"),
+        );
+
+        // <params>
+        match self.parser.current_type() {
+            Some(TokenType::RightParen) => (), // empty list
+            _ => loop {
+                if self.fun.inner.arity == u8::MAX {
+                    self.error_at_current(CompileErrorType::TooManyParams);
+                } else {
+                    self.fun.inner.arity += 1;
+                }
+
+                let param_constant = self.parse_variable(CompileErrorType::MissingParamName);
+                self.define_variable(param_constant);
+
+                if let Some(TokenType::Comma) = self.parser.current_type() {
+                    self.advance();
+                } else {
+                    break;
+                }
+            },
+        }
+
+        // )
+        self.consume(
+            TokenType::RightParen,
+            CompileErrorType::MissingRightParen("after parameters"),
+        );
+        // {
+        self.consume(
+            TokenType::LeftBrace,
+            CompileErrorType::MissingLeftBrace("before function body"),
+        );
+
+        // <body>
+        self.block();
+
+        self.end_function();
+
+        // pop from head of list and insert into constant table
+        if let Some(enclosing_fun) = self.fun.enclosing.take() {
+            let this_fun = mem::replace(&mut self.fun, enclosing_fun);
+            emit!(
+                const self: Constant / ConstantLong,
+                Value::Fun(Box::into_raw(Box::new(this_fun.inner)))
+            );
+        } else {
+            // should be infallible, enforce with runtime assertion
+            unreachable!();
+        }
+    }
+
     fn parse_variable(&mut self, err: CompileErrorType) -> usize {
         self.consume(TokenType::Identifier, err);
         if let Some(Ok(Token { text, .. })) = self.parser.previous {
             self.declare_variable(text);
 
             // globals only
-            if self.scope_depth == 0 {
-                self.chunk.add_constant(Value::r#String(text.to_string()))
+            if self.fun.scope_depth == 0 {
+                self.fun
+                    .inner
+                    .chunk
+                    .add_constant(Value::r#String(text.to_string().into_boxed_str()))
             } else {
                 0
             }
@@ -270,18 +396,19 @@ impl<'compile> Compiler<'compile> {
     }
 
     fn declare_variable(&mut self, name: &'compile str) {
-        if self.scope_depth == 0 {
+        if self.fun.scope_depth == 0 {
             return;
         }
 
         // check for shadowing in current scope only
         if self
+            .fun
             .locals
             .iter()
             .rev()
             .take_while(|(_, other_depth)| {
                 if let Some(d) = other_depth {
-                    if *d < self.scope_depth {
+                    if *d < self.fun.scope_depth {
                         return false;
                     }
                 }
@@ -297,7 +424,7 @@ impl<'compile> Compiler<'compile> {
     }
 
     fn add_local(&mut self, name: &'compile str) {
-        self.locals.push((name, None));
+        self.fun.locals.push((name, None));
     }
 
     fn var_declaration(&mut self) {
@@ -312,16 +439,25 @@ impl<'compile> Compiler<'compile> {
 
         self.consume(TokenType::Semi, CompileErrorType::MissingSemi);
 
+        self.define_variable(var_const);
+    }
+
+    fn define_variable(&mut self, var_const_index: usize) {
         // globals only
-        if self.scope_depth == 0 {
+        if self.fun.scope_depth == 0 {
             emit!(
                 self,
-                short_or_long!(var_const; DefineGlobal <> DefineGlobalLong)
+                short_or_long!(var_const_index; DefineGlobal <> DefineGlobalLong)
             );
         } else {
-            // mark as initialized
-            let last_idx = self.locals.len() - 1;
-            self.locals[last_idx].1 = Some(self.scope_depth);
+            self.mark_last_local_initialized();
+        }
+    }
+
+    fn mark_last_local_initialized(&mut self) {
+        if self.fun.scope_depth > 0 {
+            let last_idx = self.fun.locals.len() - 1;
+            self.fun.locals[last_idx].1 = Some(self.fun.scope_depth);
         }
     }
 
@@ -330,6 +466,7 @@ impl<'compile> Compiler<'compile> {
             Some(TokenType::Print) => self.print_statement(),
             Some(TokenType::For) => self.for_statement(),
             Some(TokenType::If) => self.if_statement(),
+            Some(TokenType::Return) => self.return_statement(),
             Some(TokenType::While) => self.while_statement(),
             Some(TokenType::LeftBrace) => {
                 self.advance();
@@ -342,16 +479,16 @@ impl<'compile> Compiler<'compile> {
     }
 
     fn begin_scope(&mut self) {
-        self.scope_depth += 1;
+        self.fun.scope_depth += 1;
     }
 
     fn end_scope(&mut self) {
-        self.scope_depth -= 1;
+        self.fun.scope_depth -= 1;
 
         let mut num_to_pop = 0;
-        for (_, depth) in self.locals.iter().rev() {
+        for (_, depth) in self.fun.locals.iter().rev() {
             if let Some(d) = depth {
-                if *d <= self.scope_depth {
+                if *d <= self.fun.scope_depth {
                     break;
                 }
             }
@@ -360,8 +497,11 @@ impl<'compile> Compiler<'compile> {
         }
 
         if num_to_pop > 0 {
-            self.locals.truncate(self.locals.len() - num_to_pop);
-            emit!(self, Op::PopN(num_to_pop as u8));
+            self.fun.locals.truncate(self.fun.locals.len() - num_to_pop);
+            {
+                #![allow(clippy::cast_possible_truncation)]
+                emit!(self, Op::PopN(num_to_pop as u8));
+            }
         }
     }
 
@@ -409,7 +549,7 @@ impl<'compile> Compiler<'compile> {
         self.statement();
 
         let else_jump = emit!(jump self: Jump);
-        if let Err(e) = self.chunk.patch_jump(then_jump) {
+        if let Err(e) = self.fun.inner.chunk.patch_jump(then_jump) {
             self.error(e);
         }
         emit!(self, Op::Pop);
@@ -421,13 +561,32 @@ impl<'compile> Compiler<'compile> {
             self.statement();
         }
 
-        if let Err(e) = self.chunk.patch_jump(else_jump) {
+        if let Err(e) = self.fun.inner.chunk.patch_jump(else_jump) {
             self.error(e);
         }
     }
 
+    fn return_statement(&mut self) {
+        if let FunType::Script = self.fun.r#type {
+            self.error(CompileErrorType::TopLevelReturn);
+        }
+
+        // RETURN
+        self.advance();
+
+        if let Some(TokenType::Semi) = self.parser.current_type() {
+            // no return value
+            self.advance();
+            emit!(self, Op::Nil, Op::Return);
+        } else {
+            self.expression();
+            self.consume(TokenType::Semi, CompileErrorType::MissingSemi);
+            emit!(self, Op::Return);
+        }
+    }
+
     fn while_statement(&mut self) {
-        let loop_start = self.chunk.code.len();
+        let loop_start = self.fun.inner.chunk.code.len();
 
         // WHILE
         self.advance();
@@ -451,7 +610,7 @@ impl<'compile> Compiler<'compile> {
 
         emit!(loop self: loop_start);
 
-        if let Err(e) = self.chunk.patch_jump(exit_jmp) {
+        if let Err(e) = self.fun.inner.chunk.patch_jump(exit_jmp) {
             self.error(e);
         }
 
@@ -478,7 +637,7 @@ impl<'compile> Compiler<'compile> {
             _ => self.expression_statement(),
         }
 
-        let mut loop_start = self.chunk.code.len();
+        let mut loop_start = self.fun.inner.chunk.code.len();
         let exit_jmp;
 
         // <exit condition> ;
@@ -499,7 +658,7 @@ impl<'compile> Compiler<'compile> {
         } else {
             let body_jmp = emit!(jump self: Jump);
 
-            let increment_start = self.chunk.code.len();
+            let increment_start = self.fun.inner.chunk.code.len();
             self.expression();
             emit!(self, Op::Pop);
             self.consume(
@@ -509,7 +668,7 @@ impl<'compile> Compiler<'compile> {
 
             emit!(loop self: loop_start);
             loop_start = increment_start;
-            if let Err(e) = self.chunk.patch_jump(body_jmp) {
+            if let Err(e) = self.fun.inner.chunk.patch_jump(body_jmp) {
                 self.error(e);
             }
         }
@@ -520,7 +679,7 @@ impl<'compile> Compiler<'compile> {
         emit!(loop self: loop_start);
 
         if let Some(jmp) = exit_jmp {
-            if let Err(e) = self.chunk.patch_jump(jmp) {
+            if let Err(e) = self.fun.inner.chunk.patch_jump(jmp) {
                 self.error(e);
             }
         }
@@ -624,7 +783,7 @@ impl<'compile> Compiler<'compile> {
 
     fn string(&mut self, _: bool) {
         let text_without_quotes = if let Some(Ok(t)) = &self.parser.previous {
-            t.text[1..t.text.len() - 1].to_string()
+            t.text[1..t.text.len() - 1].to_string().into_boxed_str()
         } else {
             return;
         };
@@ -634,7 +793,7 @@ impl<'compile> Compiler<'compile> {
 
     fn variable(&mut self, _: bool) {
         let token_text = if let Some(Ok(Token { text, .. })) = &self.parser.previous {
-            (*text).clone()
+            (&**text).clone()
         } else {
             unreachable!();
         };
@@ -644,7 +803,7 @@ impl<'compile> Compiler<'compile> {
 
     fn named_variable(&mut self, name: &str) {
         let resolved_index = self.resolve_local(name);
-        let value_maker = || Value::r#String(name.to_string());
+        let value_maker = || Value::r#String(name.to_string().into_boxed_str());
 
         // "Set" expression
         if let Some(TokenType::Equal) = self.parser.current_type() {
@@ -665,7 +824,7 @@ impl<'compile> Compiler<'compile> {
     }
 
     fn resolve_local(&mut self, query: &str) -> Option<usize> {
-        for (index, (name, maybe_depth)) in self.locals.iter().enumerate().rev() {
+        for (index, (name, maybe_depth)) in self.fun.locals.iter().enumerate().rev() {
             if *name == query {
                 if maybe_depth.is_none() {
                     self.error(CompileErrorType::ReadBeforeDefined(query.to_string()));
@@ -684,7 +843,7 @@ impl<'compile> Compiler<'compile> {
         emit!(self, Op::Pop);
         self.parse_precedence(Precedence::And);
 
-        if let Err(e) = self.chunk.patch_jump(end_jmp) {
+        if let Err(e) = self.fun.inner.chunk.patch_jump(end_jmp) {
             self.error(e);
         }
     }
@@ -693,20 +852,55 @@ impl<'compile> Compiler<'compile> {
         let else_jmp = emit!(jump self: JumpIfFalse);
         let end_jmp = emit!(jump self: Jump);
 
-        if let Err(e) = self.chunk.patch_jump(else_jmp) {
+        if let Err(e) = self.fun.inner.chunk.patch_jump(else_jmp) {
             self.error(e);
         }
         emit!(self, Op::Pop);
 
         self.parse_precedence(Precedence::Or);
-        if let Err(e) = self.chunk.patch_jump(end_jmp) {
+        if let Err(e) = self.fun.inner.chunk.patch_jump(end_jmp) {
             self.error(e);
         }
     }
 
+    fn call(&mut self, _: bool) {
+        let arg_count = self.argument_list();
+        emit!(self, Op::Call(arg_count));
+    }
+
+    fn argument_list(&mut self) -> u8 {
+        let mut arg_count = 0;
+
+        match self.parser.current_type() {
+            Some(TokenType::RightParen) => (), // empty list
+            _ => loop {
+                self.expression();
+
+                if arg_count == u8::MAX {
+                    self.error(CompileErrorType::TooManyParams);
+                } else {
+                    arg_count += 1;
+                }
+
+                if let Some(TokenType::Comma) = self.parser.current_type() {
+                    self.advance();
+                } else {
+                    break;
+                }
+            },
+        }
+
+        // )
+        self.consume(
+            TokenType::RightParen,
+            CompileErrorType::MissingRightParen("after arguments"),
+        );
+        arg_count
+    }
+
     fn get_rule(sigil: TokenType) -> Rule<'compile> {
         match sigil {
-            TokenType::LeftParen => (Some(Self::grouping), None, Precedence::None),
+            TokenType::LeftParen => (Some(Self::grouping), Some(Self::call), Precedence::Call),
             TokenType::Minus => (Some(Self::unary), Some(Self::binary), Precedence::Term),
             TokenType::Plus => (None, Some(Self::binary), Precedence::Term),
             TokenType::Slash | TokenType::Star => (None, Some(Self::binary), Precedence::Factor),

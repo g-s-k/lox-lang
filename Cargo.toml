@@ -26,3 +26,7 @@ stress-test-gc = []
 clap = { git = "https://github.com/clap-rs/clap/" }
 log = "0.4.8"
 simplelog = "0.7.6"
+lazy_static = "1.4.0"
+
+[profile.release]
+debug = true

@@ -2,7 +2,7 @@ use std::fmt;
 
 use super::Chunk;
 
-#[derive(Clone, Debug)]
+#[derive(Copy, Clone, Debug)]
 pub(crate) enum Op {
     // constants
     Constant(u8),
@@ -43,55 +43,83 @@ pub(crate) enum Op {
     Jump(u16),
     JumpIfFalse(u16),
     Loop(u16),
+    Call(u8),
     Return,
 }
 
 impl Op {
     pub fn disassemble<W: fmt::Write>(&self, chunk: &Chunk, f: &mut W) -> fmt::Result {
-        use Op::*;
-
-        macro_rules! constant_instr {
-            ($name:literal, $index:expr) => {{
-                write!(f, concat!($name, "\t{}"), chunk.constants[*$index as usize])
-            }};
+        macro_rules! fmt {
+            ($c:expr) => {
+                write!(f, "{:16} {}", self, $c)
+            };
         }
 
         match self {
-            Constant(index) => constant_instr!("CONSTANT", index),
-            ConstantLong(index) => constant_instr!("CONSTANT_LONG", index),
+            Op::Constant(i) | Op::GetGlobal(i) | Op::DefineGlobal(i) | Op::SetGlobal(i) => {
+                fmt!(chunk.constants[*i as usize])
+            }
+            Op::ConstantLong(i)
+            | Op::GetGlobalLong(i)
+            | Op::DefineGlobalLong(i)
+            | Op::SetGlobalLong(i) => fmt!(chunk.constants[*i as usize]),
 
-            Nil => write!(f, "NIL"),
-            True => write!(f, "TRUE"),
-            False => write!(f, "FALSE"),
+            Op::GetLocalLong(c)
+            | Op::SetLocalLong(c)
+            | Op::Jump(c)
+            | Op::JumpIfFalse(c)
+            | Op::Loop(c) => fmt!(c),
+            Op::GetLocal(c) | Op::SetLocal(c) | Op::PopN(c) | Op::Call(c) => fmt!(c),
 
-            Pop => write!(f, "POP"),
-            PopN(count) => write!(f, "POP_N\t{}", count),
-            GetGlobal(index) => constant_instr!("GET_GLOBAL", index),
-            GetGlobalLong(index) => constant_instr!("GET_GLOBAL_LONG", index),
-            DefineGlobal(index) => constant_instr!("DEF_GLOBAL", index),
-            DefineGlobalLong(index) => constant_instr!("DEF_GLOBAL_LONG", index),
-            SetGlobal(index) => constant_instr!("SET_GLOBAL", index),
-            SetGlobalLong(index) => constant_instr!("SET_GLOBAL_LONG", index),
-            GetLocal(index) => write!(f, "GET_LOCAL\t{}", index),
-            GetLocalLong(index) => write!(f, "GET_LOCAL_LONG\t{}", index),
-            SetLocal(index) => write!(f, "SET_LOCAL\t{}", index),
-            SetLocalLong(index) => write!(f, "SET_LOCAL_LONG\t{}", index),
-
-            Equal => write!(f, "EQUAL"),
-            Greater => write!(f, "GREATER"),
-            Less => write!(f, "LESS"),
-            Add => write!(f, "ADD"),
-            Subtract => write!(f, "SUBTRACT"),
-            Multiply => write!(f, "MULTIPLY"),
-            Divide => write!(f, "DIVIDE"),
-            Not => write!(f, "NOT"),
-            Negate => write!(f, "NEGATE"),
-
-            Print => write!(f, "PRINT"),
-            Jump(to) => write!(f, "JMP\t{:04}", to),
-            JumpIfFalse(to) => write!(f, "JMP_FALSE\t{:04}", to),
-            Loop(to) => write!(f, "LOOP\t{:04}", to),
-            Return => write!(f, "RETURN"),
+            _ => write!(f, "{}", self),
         }
+    }
+}
+
+impl fmt::Display for Op {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "{:width$}",
+            match self {
+                Op::Constant(_) => "CONSTANT",
+                Op::ConstantLong(_) => "CONSTANT_LONG",
+
+                Op::Nil => "NIL",
+                Op::True => "TRUE",
+                Op::False => "FALSE",
+
+                Op::Pop => "POP",
+                Op::PopN(_) => "POP_N",
+                Op::GetGlobal(_) => "GET_GLOBAL",
+                Op::GetGlobalLong(_) => "GET_GLOBAL_LONG",
+                Op::DefineGlobal(_) => "DEF_GLOBAL",
+                Op::DefineGlobalLong(_) => "DEF_GLOBAL_LONG",
+                Op::SetGlobal(_) => "SET_GLOBAL",
+                Op::SetGlobalLong(_) => "SET_GLOBAL_LONG",
+                Op::GetLocal(_) => "GET_LOCAL",
+                Op::GetLocalLong(_) => "GET_LOCAL_LONG",
+                Op::SetLocal(_) => "SET_LOCAL",
+                Op::SetLocalLong(_) => "SET_LOCAL_LONG",
+
+                Op::Equal => "EQUAL",
+                Op::Greater => "GREATER",
+                Op::Less => "LESS",
+                Op::Add => "ADD",
+                Op::Subtract => "SUBTRACT",
+                Op::Multiply => "MULTIPLY",
+                Op::Divide => "DIVIDE",
+                Op::Not => "NOT",
+                Op::Negate => "NEGATE",
+
+                Op::Print => "PRINT",
+                Op::Jump(_) => "JMP",
+                Op::JumpIfFalse(_) => "JMP_FALSE",
+                Op::Loop(_) => "LOOP",
+                Op::Call(_) => "CALL",
+                Op::Return => "RETURN",
+            },
+            width = f.width().unwrap_or_default(),
+        )
     }
 }

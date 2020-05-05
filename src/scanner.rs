@@ -200,6 +200,16 @@ impl<'a> Scanner<'a> {
         }
     }
 
+    fn current_is_identifier_token(&self) -> bool {
+        if let Some((_, 'A'..='Z')) | Some((_, 'a'..='z')) | Some((_, '_')) | Some((_, '0'..='9')) =
+            self.current
+        {
+            true
+        } else {
+            false
+        }
+    }
+
     fn identifier(&mut self, first_char: char) -> TokenType {
         if let Some(t) = match first_char {
             'a' => self.maybe_keyword("nd", TokenType::And),
@@ -228,9 +238,7 @@ impl<'a> Scanner<'a> {
             return t;
         }
 
-        while let Some((_, 'A'..='Z')) | Some((_, 'a'..='z')) | Some((_, '_'))
-        | Some((_, '0'..='9')) = self.current
-        {
+        while self.current_is_identifier_token() {
             self.next();
         }
 
@@ -247,6 +255,10 @@ impl<'a> Scanner<'a> {
             }
         }
 
-        Some(success_type)
+        if self.current_is_identifier_token() {
+            None
+        } else {
+            Some(success_type)
+        }
     }
 }

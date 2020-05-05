@@ -11,11 +11,8 @@
 //! ## About this implementation
 //!
 //! This library aims to implement Lox faithfully to the quasi-specification laid out in the book,
-//! as well as some language extensions suggested as exercises to the reader.
-//!
-//! It is loosely based off of the book's third part, which is a guide to implementing an
-//! interpreter in C. Unlike the C implementation in the book, this library is 100% safe Rust and
-//! relies on `std` for its fundamental data structures.
+//! as well as some language extensions suggested as exercises to the reader. It is loosely based
+//! off of the book's third part, which is a guide to implementing an interpreter in C.
 //!
 //! ## Usage
 //!
@@ -31,7 +28,7 @@
 //! my_vm.interpret(r#" print "hello " + "world"; "#).unwrap();
 //! ```
 
-use std::{error, fmt};
+use std::{convert::From, error, fmt};
 
 mod chunk;
 mod compiler;
@@ -41,32 +38,73 @@ mod token;
 mod value;
 mod vm;
 
+pub use value::{NativeFun, Value};
 pub use vm::VM;
 
 use {
     chunk::Chunk,
-    compiler::{CompileErrorType, Compiler},
+    compiler::{CompileError, CompileErrorType, Compiler},
     ops::Op,
     scanner::{ScanError, Scanner},
     token::{Token, TokenType},
-    value::Value,
+    value::Fun,
     vm::RuntimeError,
 };
 
-impl error::Error for dyn Error {}
+/// Compilation and runtime errors in the Lox VM.
+#[derive(Debug)]
+pub struct Error {
+    inner: Box<dyn error::Error>,
+    category: ErrorCategory,
+    line: usize,
+}
 
-/// A common interface for errors that occur in the Lox runtime.
-///
-/// All errors are upcast to a trait object. More specific information about the particular error
-/// can be obtained from its `Display` implementation.
-pub trait Error: fmt::Debug + fmt::Display {
-    fn category(&self) -> ErrorCategory;
+impl Error {
+    /// Which type of error was encountered
+    pub fn category(&self) -> ErrorCategory {
+        self.category
+    }
+
+    /// The line in the Lox source code where the error occurred
+    pub fn line(&self) -> usize {
+        self.line
+    }
+
+    fn from_runtime_error(err: RuntimeError, line: Option<usize>) -> Self {
+        Self {
+            inner: Box::new(err),
+            category: ErrorCategory::Runtime,
+            line: line.unwrap_or(1),
+        }
+    }
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self.inner)
+    }
+}
+
+impl error::Error for Error {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
+        Some(&*self.inner)
+    }
 }
 
 /// Where in the pipeline an error occurred.
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 #[non_exhaustive]
 pub enum ErrorCategory {
     Compilation,
     Runtime,
+}
+
+impl From<CompileError> for Error {
+    fn from(inner: CompileError) -> Self {
+        Self {
+            line: inner.line,
+            inner: Box::new(inner),
+            category: ErrorCategory::Compilation,
+        }
+    }
 }
