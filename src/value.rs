@@ -1,6 +1,6 @@
 use std::{cmp, error, fmt};
 
-use super::{Chunk, RuntimeError};
+use super::{Chunk, RuntimeError, UpvalueType};
 
 /// Underlying representation of runtime values in Lox.
 #[derive(Clone)]
@@ -11,9 +11,9 @@ pub enum Value {
     Number(f64),
     r#String(Box<str>),
     #[doc(hidden)]
-    Fun(&'static Fun),
+    Fun(*const Fun),
     #[doc(hidden)]
-    Closure(&'static Fun, &'static [*mut upvalue::Obj]),
+    Closure(*const Fun, Box<[*mut UpvalueType]>),
     NativeFun(NativeFun),
 }
 
@@ -24,8 +24,8 @@ impl fmt::Display for Value {
             Self::Boolean(b) => write!(f, "{}", b),
             Self::Number(v) => write!(f, "{}", v),
             Self::r#String(s) => write!(f, "{}", s),
-            Self::Fun(fun) => write!(f, "{}", fun),
-            Self::Closure(fun, _) => write!(f, "{}", fun),
+            Self::Fun(fun) => write!(f, "{}", unsafe { &**fun }),
+            Self::Closure(fun, _) => write!(f, "{}", unsafe { &**fun }),
             Self::NativeFun(_) => write!(f, "#<native fun>"),
         }
     }
@@ -38,8 +38,10 @@ impl fmt::Debug for Value {
             Self::Boolean(b) => write!(f, "Boolean({})", b),
             Self::Number(v) => write!(f, "Number({})", v),
             Self::r#String(s) => write!(f, "String({})", s),
-            Self::Fun(fun) => write!(f, "Fun({})", fun),
-            Self::Closure(fun, upvals) => write!(f, "Closure({}, {:#?})", fun, upvals),
+            Self::Fun(fun) => write!(f, "Fun({})", unsafe { &**fun }),
+            Self::Closure(fun, upvals) => {
+                write!(f, "Closure({}, {:#?})", unsafe { &**fun }, upvals)
+            }
             Self::NativeFun(ptr) => write!(f, "NativeFun({:p})", ptr),
         }
     }
@@ -94,56 +96,6 @@ impl Fun {
             name: name.to_string().into_boxed_str(),
             chunk: Chunk::new(name),
         }
-    }
-}
-
-pub use upvalue::{Obj as UpvalueObj, Type as UpvalueType};
-
-mod upvalue {
-    use std::mem;
-
-    #[derive(Clone, Debug)]
-    pub struct Obj {
-        pub(crate) next: Option<Box<Obj>>,
-        pub(crate) value: Type,
-    }
-
-    impl Obj {
-        pub fn new(index: usize) -> Self {
-            Self {
-                next: None,
-                value: Type::Live(index),
-            }
-        }
-
-        fn prepend(self, head: &mut Option<Box<Self>>) -> *mut Self {
-            let old_head = mem::replace(head, Some(Box::new(self)));
-
-            if let Some(ref mut new_head) = head {
-                new_head.next = old_head;
-                &mut **new_head
-            } else {
-                unreachable!();
-            }
-        }
-
-        pub fn insert_live(head: &mut Option<Box<Self>>, slot: usize) -> *mut Self {
-            if let Some(inner) = head {
-                match inner.value {
-                    Type::Live(c) if c == slot => &mut **inner,
-                    Type::Live(c) if c < slot => Self::new(slot).prepend(head),
-                    _ => Self::insert_live(&mut inner.next, slot),
-                }
-            } else {
-                Self::new(slot).prepend(head)
-            }
-        }
-    }
-
-    #[derive(Clone, Copy, Debug)]
-    pub enum Type {
-        Live(usize),
-        Captured(*mut super::Value),
     }
 }
 

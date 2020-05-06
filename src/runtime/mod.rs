@@ -6,6 +6,7 @@ pub mod vm;
 pub(crate) enum RuntimeError {
     ArgumentTypes,
     StackEmpty,
+    BadStackIndex(usize, usize),
     UndefinedGlobal(String),
     NotCallable,
     ArityMismatch(u8, u8),
@@ -28,6 +29,11 @@ impl fmt::Display for RuntimeError {
         match self {
             Self::ArgumentTypes => write!(f, "incompatible types for operation"),
             Self::StackEmpty => write!(f, "tried to pop value from empty stack"),
+            Self::BadStackIndex(wanted, len) => write!(
+                f,
+                "tried to access value at index {} beyond end of stack (height {})",
+                wanted, len
+            ),
             Self::UndefinedGlobal(name) => {
                 write!(f, "tried to access undefined variable `{}`", name)
             }

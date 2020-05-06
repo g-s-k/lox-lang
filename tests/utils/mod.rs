@@ -1,5 +1,7 @@
 #![macro_use]
 
+use simplelog::{ConfigBuilder, LevelFilter, SimpleLogger};
+
 macro_rules! run {
     ($source: literal -> $( $expected: literal ),*) => {{
         let mut buffer = Vec::new();
@@ -12,3 +14,15 @@ macro_rules! run {
 }
 
 pub type Result = std::result::Result<(), lox_lang::Error>;
+
+#[allow(dead_code)]
+pub fn setup_logger() {
+    let _ = SimpleLogger::init(
+        LevelFilter::Debug,
+        ConfigBuilder::new()
+            .set_thread_level(LevelFilter::Off)
+            .set_time_level(LevelFilter::Off)
+            .set_location_level(LevelFilter::Debug)
+            .build(),
+    );
+}

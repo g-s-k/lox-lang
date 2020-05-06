@@ -2,6 +2,7 @@ mod utils;
 
 #[test]
 fn inner_outer() -> utils::Result {
+    // utils::setup_logger();
     run!(
         r#"
 var x = "global";
@@ -24,6 +25,7 @@ outer();
 
 #[test]
 fn local() -> utils::Result {
+    // utils::setup_logger();
     run!(
         r#"
 fun makeClosure() {
@@ -45,6 +47,7 @@ closure();
 
 #[test]
 fn fun_argument() -> utils::Result {
+    // utils::setup_logger();
     run!(
         r#"
 fun makeClosure(value) {
@@ -66,6 +69,7 @@ bagel();
 
 #[test]
 fn deferred_declaration() -> utils::Result {
+    // utils::setup_logger();
     run!(r#"
 fun outer() {
   var x = "value";

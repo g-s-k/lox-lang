@@ -2,7 +2,7 @@ use std::{collections::HashMap, fmt, io::Write};
 
 use {
     super::RuntimeError,
-    crate::{Chunk, Compiler, Error, Fun, Op, Upvalue, UpvalueObj, UpvalueType, Value},
+    crate::{Chunk, Compiler, Error, Fun, List, Op, Upvalue, UpvalueType, Value, GC},
 };
 
 /// The Lox virtual machine.
@@ -19,7 +19,8 @@ pub struct VM<'writer> {
     stack: Vec<Value>,
     frames: Vec<CallFrame>,
     globals: HashMap<Box<str>, Value>,
-    open_upvalues: Option<Box<UpvalueObj>>,
+    open_upvalues: Option<Box<List<*mut UpvalueType>>>,
+    gc: GC,
 }
 
 impl Default for VM<'_> {
@@ -37,6 +38,7 @@ impl Default for VM<'_> {
             frames: Vec::with_capacity(256),
             globals: HashMap::new(),
             open_upvalues: None,
+            gc: GC::default(),
         }
     }
 }
@@ -52,7 +54,7 @@ impl<'writer, 'source> VM<'writer> {
         let fun = Compiler::compile(source.as_ref())
             .map_err(|errs| errs.into_iter().map(Into::into).collect::<Vec<_>>())?;
 
-        self.stack.push(Value::Fun(Box::leak(Box::new(fun))));
+        self.stack.push(Value::Fun(self.gc.alloc_fun(fun)));
         let _ = self.call_value(0);
 
         self.run().map_err(|err| {
@@ -262,7 +264,7 @@ impl<'writer, 'source> VM<'writer> {
             self.globals.insert(var_name, value);
             Ok(())
         } else {
-            Err(RuntimeError::StackEmpty)
+            Err(RuntimeError::BadStackIndex(index.into(), self.stack.len()))
         }
     }
 
@@ -296,11 +298,12 @@ impl<'writer, 'source> VM<'writer> {
     fn fetch_local<T: Into<usize>>(&mut self, index: T) -> Result<(), RuntimeError> {
         let base_ptr = usize::from(self.frame().base);
 
-        if let Some(val) = self.stack.get(index.into() + base_ptr).cloned() {
+        let index = index.into();
+        if let Some(val) = self.stack.get(index + base_ptr).cloned() {
             self.stack.push(val);
             Ok(())
         } else {
-            Err(RuntimeError::StackEmpty)
+            Err(RuntimeError::BadStackIndex(index, self.stack.len()))
         }
     }
 
@@ -337,11 +340,13 @@ impl<'writer, 'source> VM<'writer> {
     fn peek(&self, distance: usize) -> Result<&Value, RuntimeError> {
         if let Some(idx) = self.stack.len().checked_sub(distance + 1) {
             if let Some(val) = self.stack.get(idx) {
-                return Ok(val);
+                Ok(val)
+            } else {
+                Err(RuntimeError::BadStackIndex(idx, self.stack.len()))
             }
+        } else {
+            Err(RuntimeError::StackEmpty)
         }
-
-        Err(RuntimeError::StackEmpty)
     }
 
     fn create_closure<T: Into<usize>>(
@@ -353,85 +358,88 @@ impl<'writer, 'source> VM<'writer> {
             let mut upvalues = Vec::new();
             for Upvalue { index, is_local } in upvals {
                 upvalues.push(if *is_local {
-                    self.capture_upvalue(self.frame().base + index)
+                    unsafe { *self.capture_upvalue(self.frame().base + index) }
                 } else {
                     self.frame().upvalues[*index]
                 });
             }
 
             self.stack
-                .push(Value::Closure(f, Box::leak(upvalues.into_boxed_slice())));
+                .push(Value::Closure(f, upvalues.into_boxed_slice()));
             Ok(())
         } else {
             Err(RuntimeError::ArgumentTypes)
         }
     }
 
-    fn capture_upvalue(&mut self, ptr: usize) -> *mut UpvalueObj {
-        UpvalueObj::insert_live(&mut self.open_upvalues, ptr)
+    // possible TODO: double iteration here. not sure if it's worth the custom code to do it in one
+    // iteration, given that the list is almost always empty or very short
+    fn capture_upvalue(&mut self, slot: usize) -> *const *mut UpvalueType {
+        if let Some(r) = List::get(&mut self.open_upvalues, |u_val| match unsafe { &**u_val } {
+            UpvalueType::Live(s) if *s == slot => true,
+            _ => false,
+        }) {
+            return r;
+        }
+
+        List::insert_before(
+            &mut self.open_upvalues,
+            self.gc.alloc_upvalue(UpvalueType::Live(slot)),
+            |u_val| match unsafe { &**u_val } {
+                UpvalueType::Live(s) if *s < slot => true,
+                _ => false,
+            },
+        )
     }
 
     fn fetch_upvalue<T: Into<usize>>(&mut self, index: T) -> Result<(), RuntimeError> {
-        let u = index.into();
-        match self.frame().get_upvalue(u) {
-            Some(UpvalueObj {
-                value: UpvalueType::Live(slot),
-                ..
-            }) => {
+        match self.frame().get_upvalue(index.into()) {
+            Some(UpvalueType::Live(slot)) => {
                 if let Some(val) = self.stack.get(*slot).cloned() {
                     self.stack.push(val);
                     Ok(())
                 } else {
-                    Err(RuntimeError::StackEmpty)
+                    Err(RuntimeError::BadStackIndex(*slot, self.stack.len()))
                 }
             }
-            Some(UpvalueObj {
-                value: UpvalueType::Captured(ptr),
-                ..
-            }) => {
+            Some(UpvalueType::Captured(ptr)) => {
                 let val = unsafe { (**ptr).clone() };
                 self.stack.push(val);
                 Ok(())
             }
-            _ => unimplemented!(),
+            _ => unreachable!(),
         }
     }
 
     fn set_upvalue<T: Into<usize>>(&mut self, index: T) -> Result<(), RuntimeError> {
         match self.frame().get_upvalue(index.into()) {
-            Some(UpvalueObj {
-                value: UpvalueType::Live(slot),
-                ..
-            }) => {
+            Some(UpvalueType::Live(slot)) => {
                 let slot = *slot;
                 let val = self.peek(0)?.clone();
                 if let Some(el) = self.stack.get_mut(slot) {
                     *el = val;
                     Ok(())
                 } else {
-                    Err(RuntimeError::StackEmpty)
+                    Err(RuntimeError::BadStackIndex(slot, self.stack.len()))
                 }
             }
-            Some(UpvalueObj {
-                value: UpvalueType::Captured(ptr),
-                ..
-            }) => unsafe {
+            Some(UpvalueType::Captured(ptr)) => unsafe {
                 **ptr = self.peek(0)?.clone();
                 Ok(())
             },
-            _ => unimplemented!(),
+            _ => unreachable!(),
         }
     }
 
     fn close_upvalues(&mut self, max_height: usize) {
         loop {
-            let value = if let Some(u_val) = &self.open_upvalues {
-                if let UpvalueType::Live(slot) = u_val.value {
-                    if slot < max_height {
+            let slot = if let Some(ref u_val) = self.open_upvalues {
+                if let UpvalueType::Live(slot) = unsafe { &**u_val.as_ref().as_ref() } {
+                    if *slot < max_height {
                         break;
                     }
 
-                    self.stack[slot].clone()
+                    *slot
                 } else {
                     unreachable!("open upvalue list should not contain any closed upvalues");
                 }
@@ -439,21 +447,24 @@ impl<'writer, 'source> VM<'writer> {
                 break;
             };
 
-            if let Some(mut u_val) = self.open_upvalues.take() {
-                self.open_upvalues = u_val.next.take();
-                u_val.value = UpvalueType::Captured(Box::into_raw(Box::new(value)));
-
-                Box::leak(u_val);
+            if let Some(u_val) = List::pop(&mut self.open_upvalues) {
+                // important: taking a mutable reference here ensures we modify it in place (where
+                // existing closure objects can see it), and not as a copy
+                let upvalue_ref = unsafe { &mut **u_val };
+                upvalue_ref.close(self.gc.alloc_value(self.stack[slot].clone()));
             } else {
-                unreachable!("should have broken already if not");
+                unreachable!("If list is empty this should have reached a break condition sooner");
             }
         }
     }
 
     fn call_value(&mut self, arg_count: u8) -> Result<(), RuntimeError> {
         match *self.peek(arg_count.into())? {
-            Value::Closure(f, u) => self.call(f, u, arg_count),
-            Value::Fun(f) => self.call(f, &[], arg_count),
+            Value::Closure(f, ref u) => {
+                let u = u.clone();
+                self.call(unsafe { &*f }, u, arg_count)
+            }
+            Value::Fun(f) => self.call(unsafe { &*f }, Box::new([]), arg_count),
             Value::NativeFun(f) => {
                 let from = self
                     .stack
@@ -475,7 +486,7 @@ impl<'writer, 'source> VM<'writer> {
     fn call(
         &mut self,
         callee: &'static Fun,
-        upvalues: &'static [*mut UpvalueObj],
+        upvalues: Box<[*mut UpvalueType]>,
         arg_count: u8,
     ) -> Result<(), RuntimeError> {
         if arg_count == callee.arity {
@@ -547,7 +558,7 @@ struct CallFrame {
     func: &'static Fun,
     inst: usize,
     base: usize,
-    upvalues: &'static [*mut UpvalueObj],
+    upvalues: Box<[*mut UpvalueType]>,
 }
 
 impl CallFrame {
@@ -555,7 +566,7 @@ impl CallFrame {
         &self.func.chunk
     }
 
-    fn get_upvalue(&self, index: usize) -> Option<&UpvalueObj> {
+    fn get_upvalue(&self, index: usize) -> Option<&UpvalueType> {
         if let Some(u_val) = self.upvalues.get(index) {
             Some(unsafe { &**u_val })
         } else {

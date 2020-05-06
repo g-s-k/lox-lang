@@ -435,9 +435,13 @@ impl<'compile> Compiler<'compile> {
         if let Some(enclosing_fun) = self.fun.enclosing.take() {
             let this_fun = mem::replace(&mut self.fun, enclosing_fun);
             // TODO memory leak
-            let fun_value = Value::Fun(Box::leak(Box::new(this_fun.inner)));
-            let upvalues = this_fun.upvalues.into_boxed_slice();
-            emit!(const self: Closure / ClosureLong, fun_value, upvalues);
+            let fun_value = Value::Fun(Box::into_raw(Box::new(this_fun.inner)));
+            if this_fun.upvalues.is_empty() {
+                emit!(const self: Constant / ConstantLong, fun_value)
+            } else {
+                let upvalues = this_fun.upvalues.into_boxed_slice();
+                emit!(const self: Closure / ClosureLong, fun_value, upvalues);
+            }
         } else {
             // should be infallible, enforce with runtime assertion
             unreachable!();

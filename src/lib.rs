@@ -32,6 +32,8 @@ use std::{convert::From, error, fmt};
 
 mod chunk;
 mod compiler;
+mod heap;
+mod list;
 mod ops;
 mod runtime;
 mod value;
@@ -42,9 +44,11 @@ pub use value::{NativeFun, Value};
 use {
     chunk::Chunk,
     compiler::{CompileError, CompileErrorType, Compiler, Upvalue},
+    heap::{UpvalueType, GC},
+    list::List,
     ops::Op,
     runtime::RuntimeError,
-    value::{Fun, UpvalueObj, UpvalueType},
+    value::Fun,
 };
 
 /// Compilation and runtime errors in the Lox VM.
