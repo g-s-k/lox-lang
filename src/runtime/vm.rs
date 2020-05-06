@@ -190,8 +190,8 @@ impl<'writer, 'source> VM<'writer> {
                 Op::Call(arg_count) => {
                     self.call_value(arg_count)?;
                 }
-                Op::Closure(index, upvals) => self.create_closure(index, upvals)?,
-                Op::ClosureLong(index, upvals) => self.create_closure(index, upvals)?,
+                Op::Closure(index, upvals) => self.create_closure(index, &upvals)?,
+                Op::ClosureLong(index, upvals) => self.create_closure(index, &upvals)?,
                 Op::CloseUpvalue => {
                     self.close_upvalues(self.stack.len() - 1);
                     self.stack.pop();
@@ -235,7 +235,7 @@ impl<'writer, 'source> VM<'writer> {
 
     fn step(&mut self) -> Option<Op> {
         let frame = self.frame();
-        frame.chunk().code.get(frame.inst).copied()
+        frame.chunk().code.get(frame.inst).cloned()
     }
 
     fn read_constant<T: Into<usize>>(&self, index: T) -> &Value {

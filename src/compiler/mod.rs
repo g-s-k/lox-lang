@@ -139,7 +139,7 @@ struct Local<'compile> {
     is_captured: bool,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct Upvalue {
     pub index: usize,
     pub is_local: bool,
@@ -434,9 +434,9 @@ impl<'compile> Compiler<'compile> {
         // pop from head of list and insert into constant table
         if let Some(enclosing_fun) = self.fun.enclosing.take() {
             let this_fun = mem::replace(&mut self.fun, enclosing_fun);
-            // TODO memory leaks
+            // TODO memory leak
             let fun_value = Value::Fun(Box::leak(Box::new(this_fun.inner)));
-            let upvalues = Box::leak(this_fun.upvalues.into_boxed_slice());
+            let upvalues = this_fun.upvalues.into_boxed_slice();
             emit!(const self: Closure / ClosureLong, fun_value, upvalues);
         } else {
             // should be infallible, enforce with runtime assertion

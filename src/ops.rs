@@ -2,7 +2,7 @@ use std::fmt;
 
 use super::{Chunk, Upvalue};
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) enum Op {
     // constants
     Constant(u8),
@@ -47,8 +47,8 @@ pub(crate) enum Op {
     JumpIfFalse(u16),
     Loop(u16),
     Call(u8),
-    Closure(u8, &'static [Upvalue]),
-    ClosureLong(u16, &'static [Upvalue]),
+    Closure(u8, Box<[Upvalue]>),
+    ClosureLong(u16, Box<[Upvalue]>),
     CloseUpvalue,
     Return,
 }
@@ -67,7 +67,7 @@ impl Op {
 
                 write!(f, "\t {{")?;
                 let mut first = true;
-                for Upvalue { index, is_local } in *$u {
+                for Upvalue { index, is_local } in $u.iter() {
                     if first {
                         first = false;
                     } else {

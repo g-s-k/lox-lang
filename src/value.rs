@@ -2,46 +2,6 @@ use std::{cmp, error, fmt};
 
 use super::{Chunk, RuntimeError};
 
-/// A natively-implemented function that can be called from Lox code.
-///
-/// ## Example
-///
-/// ```
-/// # use {std::{error::Error, fmt}, lox_lang::{Value, VM}};
-/// # #[derive(Debug)]
-/// # struct MyError;
-/// # impl fmt::Display for MyError {
-/// #     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-/// #         write!(f, "wrong types")
-/// #     }
-/// # }
-/// # impl Error for MyError {}
-/// /// This function wraps `str::replace` for use in Lox
-/// fn replace(args: &[Value]) -> Result<Value, Box<dyn Error>> {
-///     match args {
-///         [Value::r#String(text), Value::r#String(pat), Value::r#String(rep)] =>
-///             Ok(Value::r#String(text.replace(pat.as_ref(), rep).into())),
-///         _ => Err(Box::new(MyError)),
-///     }
-/// }
-///
-/// let mut output = Vec::new();
-/// let mut vm = VM::default();
-/// vm.replace_stream(Some(&mut output));
-/// vm.define_global("replace", Value::NativeFun(replace));
-///
-/// vm.interpret(r#"
-///     var proverb = "what is old becomes new again";
-///     print replace(proverb, "new", "old");
-/// "#);
-///
-/// assert_eq!(
-///     String::from_utf8(output).unwrap(),
-///     "what is old becomes old again\n"
-/// );
-/// ```
-pub type NativeFun = fn(args: &[Value]) -> Result<Value, Box<dyn error::Error>>;
-
 /// Underlying representation of runtime values in Lox.
 #[derive(Clone)]
 #[non_exhaustive]
@@ -186,3 +146,43 @@ mod upvalue {
         Captured(*mut super::Value),
     }
 }
+
+/// A natively-implemented function that can be called from Lox code.
+///
+/// ## Example
+///
+/// ```
+/// # use {std::{error::Error, fmt}, lox_lang::{Value, VM}};
+/// # #[derive(Debug)]
+/// # struct MyError;
+/// # impl fmt::Display for MyError {
+/// #     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+/// #         write!(f, "wrong types")
+/// #     }
+/// # }
+/// # impl Error for MyError {}
+/// /// This function wraps `str::replace` for use in Lox
+/// fn replace(args: &[Value]) -> Result<Value, Box<dyn Error>> {
+///     match args {
+///         [Value::r#String(text), Value::r#String(pat), Value::r#String(rep)] =>
+///             Ok(Value::r#String(text.replace(pat.as_ref(), rep).into())),
+///         _ => Err(Box::new(MyError)),
+///     }
+/// }
+///
+/// let mut output = Vec::new();
+/// let mut vm = VM::default();
+/// vm.replace_stream(Some(&mut output));
+/// vm.define_global("replace", Value::NativeFun(replace));
+///
+/// vm.interpret(r#"
+///     var proverb = "what is old becomes new again";
+///     print replace(proverb, "new", "old");
+/// "#);
+///
+/// assert_eq!(
+///     String::from_utf8(output).unwrap(),
+///     "what is old becomes old again\n"
+/// );
+/// ```
+pub type NativeFun = fn(args: &[Value]) -> Result<Value, Box<dyn error::Error>>;
