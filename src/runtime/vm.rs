@@ -1,81 +1,9 @@
-use std::{collections::HashMap, error, fmt, io::Write};
+use std::{collections::HashMap, fmt, io::Write};
 
-use super::{Chunk, Compiler, Error, Fun, Op, Value};
-
-#[derive(Debug)]
-pub(crate) enum RuntimeError {
-    ArgumentTypes,
-    StackEmpty,
-    UndefinedGlobal(String),
-    NotCallable,
-    ArityMismatch(u8, u8),
-    CallStackOverflow,
-    ValueStackOverflow,
-    NativeFunError(Box<dyn error::Error>),
-}
-
-impl error::Error for RuntimeError {
-    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
-        match self {
-            Self::NativeFunError(e) => Some(e.as_ref()),
-            _ => None,
-        }
-    }
-}
-
-impl fmt::Display for RuntimeError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Self::ArgumentTypes => write!(f, "incompatible types for operation"),
-            Self::StackEmpty => write!(f, "tried to pop value from empty stack"),
-            Self::UndefinedGlobal(name) => {
-                write!(f, "tried to access undefined variable `{}`", name)
-            }
-            Self::NotCallable => write!(f, "tried to call a non-callable value"),
-            Self::ArityMismatch(expected, got) => {
-                write!(f, "expected {} arguments but got {}", expected, got)
-            }
-            Self::CallStackOverflow => write!(f, "call stack overflowed"),
-            Self::ValueStackOverflow => write!(f, "too many temporaries and locals on the stack"),
-            Self::NativeFunError(inner) => {
-                write!(f, "native function returned an error: {}", inner)
-            }
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-struct CallFrame {
-    // we know the `Fun` ref will be valid for the full lifetime of the call frame, but the
-    // compiler doesn't believe us if we use a regular Rust reference
-    func: *const Fun,
-    inst: usize,
-    base: u16,
-}
-
-impl Default for CallFrame {
-    fn default() -> Self {
-        Self {
-            func: std::ptr::null(),
-            inst: 0,
-            base: 0,
-        }
-    }
-}
-
-impl CallFrame {
-    fn new(func: &Fun, stack_top: u16) -> Self {
-        Self {
-            func: &*func,
-            inst: 0,
-            base: stack_top.checked_sub(1).unwrap_or_default() - u16::from(func.arity),
-        }
-    }
-
-    fn chunk(&self) -> &Chunk {
-        unsafe { &(*self.func).chunk }
-    }
-}
+use {
+    super::RuntimeError,
+    crate::{Chunk, Compiler, Error, Fun, Op, Upvalue, UpvalueObj, UpvalueType, Value},
+};
 
 /// The Lox virtual machine.
 ///
@@ -91,6 +19,7 @@ pub struct VM<'writer> {
     stack: Vec<Value>,
     frames: Vec<CallFrame>,
     globals: HashMap<Box<str>, Value>,
+    open_upvalues: Option<Box<UpvalueObj>>,
 }
 
 impl Default for VM<'_> {
@@ -104,9 +33,10 @@ impl Default for VM<'_> {
     fn default() -> Self {
         VM {
             stdout: None,
-            stack: Vec::new(),
-            frames: Vec::new(),
+            stack: Vec::with_capacity(256),
+            frames: Vec::with_capacity(256),
             globals: HashMap::new(),
+            open_upvalues: None,
         }
     }
 }
@@ -122,7 +52,7 @@ impl<'writer, 'source> VM<'writer> {
         let fun = Compiler::compile(source.as_ref())
             .map_err(|errs| errs.into_iter().map(Into::into).collect::<Vec<_>>())?;
 
-        let _ = self.stack.push(Value::Fun(Box::into_raw(Box::new(fun))));
+        self.stack.push(Value::Fun(Box::leak(Box::new(fun))));
         let _ = self.call_value(0);
 
         self.run().map_err(|err| {
@@ -130,7 +60,7 @@ impl<'writer, 'source> VM<'writer> {
             let mut backtrace = format!("{}", err);
 
             for frame in self.frames.iter().rev() {
-                let function = unsafe { &(*frame.func).name };
+                let function = &frame.func.name;
                 let (line, _) = frame.chunk().find_line(frame.inst);
 
                 if line_no.is_none() {
@@ -199,9 +129,6 @@ impl<'writer, 'source> VM<'writer> {
                 Op::Pop => {
                     self.stack.pop();
                 }
-                Op::PopN(count) => {
-                    self.pop_many(count.into())?;
-                }
                 Op::GetGlobal(index) => self.fetch_global(index)?,
                 Op::GetGlobalLong(index) => self.fetch_global(index)?,
                 Op::DefineGlobal(index) => self.define_global_from_stack(index)?,
@@ -212,6 +139,10 @@ impl<'writer, 'source> VM<'writer> {
                 Op::GetLocalLong(index) => self.fetch_local(index)?,
                 Op::SetLocal(index) => self.set_local(index)?,
                 Op::SetLocalLong(index) => self.set_local(index)?,
+                Op::GetUpvalue(index) => self.fetch_upvalue(index)?,
+                Op::GetUpvalueLong(index) => self.fetch_upvalue(index)?,
+                Op::SetUpvalue(index) => self.set_upvalue(index)?,
+                Op::SetUpvalueLong(index) => self.set_upvalue(index)?,
                 Op::Equal => {
                     let (a, b) = self.pop_pair()?;
                     self.stack.push(Value::Boolean(b == a));
@@ -259,9 +190,17 @@ impl<'writer, 'source> VM<'writer> {
                 Op::Call(arg_count) => {
                     self.call_value(arg_count)?;
                 }
+                Op::Closure(index, upvals) => self.create_closure(index, upvals)?,
+                Op::ClosureLong(index, upvals) => self.create_closure(index, upvals)?,
+                Op::CloseUpvalue => {
+                    self.close_upvalues(self.stack.len() - 1);
+                    self.stack.pop();
+                }
                 Op::Return => {
                     let base_ptr = self.frame().base;
                     let result = self.stack.pop().ok_or(RuntimeError::StackEmpty)?;
+
+                    self.close_upvalues(base_ptr);
 
                     self.frames.pop();
                     if self.frames.is_empty() {
@@ -366,7 +305,7 @@ impl<'writer, 'source> VM<'writer> {
     }
 
     fn set_local<T: Into<usize>>(&mut self, index: T) -> Result<(), RuntimeError> {
-        let base_ptr = usize::from(self.frame().base);
+        let base_ptr = self.frame().base;
         let new_val = self.peek(0)?.clone();
 
         if let Some(el) = self.stack.get_mut(index.into() + base_ptr) {
@@ -405,9 +344,116 @@ impl<'writer, 'source> VM<'writer> {
         Err(RuntimeError::StackEmpty)
     }
 
+    fn create_closure<T: Into<usize>>(
+        &mut self,
+        index: T,
+        upvals: &[Upvalue],
+    ) -> Result<(), RuntimeError> {
+        if let Value::Fun(f) = self.read_constant(index).clone() {
+            let mut upvalues = Vec::new();
+            for Upvalue { index, is_local } in upvals {
+                upvalues.push(if *is_local {
+                    self.capture_upvalue(self.frame().base + index)
+                } else {
+                    self.frame().upvalues[*index]
+                });
+            }
+
+            self.stack
+                .push(Value::Closure(f, Box::leak(upvalues.into_boxed_slice())));
+            Ok(())
+        } else {
+            Err(RuntimeError::ArgumentTypes)
+        }
+    }
+
+    fn capture_upvalue(&mut self, ptr: usize) -> *mut UpvalueObj {
+        UpvalueObj::insert_live(&mut self.open_upvalues, ptr)
+    }
+
+    fn fetch_upvalue<T: Into<usize>>(&mut self, index: T) -> Result<(), RuntimeError> {
+        let u = index.into();
+        match self.frame().get_upvalue(u) {
+            Some(UpvalueObj {
+                value: UpvalueType::Live(slot),
+                ..
+            }) => {
+                if let Some(val) = self.stack.get(*slot).cloned() {
+                    self.stack.push(val);
+                    Ok(())
+                } else {
+                    Err(RuntimeError::StackEmpty)
+                }
+            }
+            Some(UpvalueObj {
+                value: UpvalueType::Captured(ptr),
+                ..
+            }) => {
+                let val = unsafe { (**ptr).clone() };
+                self.stack.push(val);
+                Ok(())
+            }
+            _ => unimplemented!(),
+        }
+    }
+
+    fn set_upvalue<T: Into<usize>>(&mut self, index: T) -> Result<(), RuntimeError> {
+        match self.frame().get_upvalue(index.into()) {
+            Some(UpvalueObj {
+                value: UpvalueType::Live(slot),
+                ..
+            }) => {
+                let slot = *slot;
+                let val = self.peek(0)?.clone();
+                if let Some(el) = self.stack.get_mut(slot) {
+                    *el = val;
+                    Ok(())
+                } else {
+                    Err(RuntimeError::StackEmpty)
+                }
+            }
+            Some(UpvalueObj {
+                value: UpvalueType::Captured(ptr),
+                ..
+            }) => unsafe {
+                **ptr = self.peek(0)?.clone();
+                Ok(())
+            },
+            _ => unimplemented!(),
+        }
+    }
+
+    fn close_upvalues(&mut self, max_height: usize) {
+        loop {
+            let value = if let Some(u_val) = &self.open_upvalues {
+                if let UpvalueType::Live(slot) = u_val.value {
+                    if slot < max_height {
+                        break;
+                    }
+
+                    self.stack[slot].clone()
+                } else {
+                    unreachable!("open upvalue list should not contain any closed upvalues");
+                }
+            } else {
+                break;
+            };
+
+            if let Some(mut u_val) = self.open_upvalues.take() {
+                self.open_upvalues = u_val.next.take();
+                u_val.value = UpvalueType::Captured(Box::into_raw(Box::new(value)));
+
+                Box::leak(u_val);
+            } else {
+                unreachable!("should have broken already if not");
+            }
+        }
+    }
+
     fn call_value(&mut self, arg_count: u8) -> Result<(), RuntimeError> {
-        match *self.peek(arg_count as usize)? {
-            Value::Fun(f) => self.call(unsafe { &*f }, arg_count),
+        match *self.peek(arg_count.into())? {
+            Value::Closure(f, u) => self.call(f, u, arg_count),
+            Value::Fun(f) => self.call(f, &[], arg_count),
             Value::NativeFun(f) => {
                 let from = self
                     .stack
@@ -426,13 +472,26 @@ impl<'writer, 'source> VM<'writer> {
         }
     }
 
-    fn call(&mut self, callee: &Fun, arg_count: u8) -> Result<(), RuntimeError> {
-        if arg_count != callee.arity {
-            Err(RuntimeError::ArityMismatch(callee.arity, arg_count))
-        } else {
-            self.frames
-                .push(CallFrame::new(callee, self.stack.len() as u16));
+    fn call(
+        &mut self,
+        callee: &'static Fun,
+        upvalues: &'static [*mut UpvalueObj],
+        arg_count: u8,
+    ) -> Result<(), RuntimeError> {
+        if arg_count == callee.arity {
+            self.frames.push(CallFrame {
+                func: callee,
+                inst: 0,
+                base: self
+                    .stack
+                    .len()
+                    .checked_sub(1 + usize::from(arg_count))
+                    .ok_or(RuntimeError::StackEmpty)?,
+                upvalues,
+            });
             Ok(())
+        } else {
+            Err(RuntimeError::ArityMismatch(callee.arity, arg_count))
         }
     }
 
@@ -479,6 +538,28 @@ impl<'writer, 'source> VM<'writer> {
             out.write_fmt(args).unwrap();
         } else {
             print!("{}", args);
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CallFrame {
+    func: &'static Fun,
+    inst: usize,
+    base: usize,
+    upvalues: &'static [*mut UpvalueObj],
+}
+
+impl CallFrame {
+    fn chunk(&self) -> &Chunk {
+        &self.func.chunk
+    }
+
+    fn get_upvalue(&self, index: usize) -> Option<&UpvalueObj> {
+        if let Some(u_val) = self.upvalues.get(index) {
+            Some(unsafe { &**u_val })
+        } else {
+            None
         }
     }
 }

@@ -33,22 +33,18 @@ use std::{convert::From, error, fmt};
 mod chunk;
 mod compiler;
 mod ops;
-mod scanner;
-mod token;
+mod runtime;
 mod value;
-mod vm;
 
+pub use runtime::vm::VM;
 pub use value::{NativeFun, Value};
-pub use vm::VM;
 
 use {
     chunk::Chunk,
-    compiler::{CompileError, CompileErrorType, Compiler},
+    compiler::{CompileError, CompileErrorType, Compiler, Upvalue},
     ops::Op,
-    scanner::{ScanError, Scanner},
-    token::{Token, TokenType},
-    value::Fun,
-    vm::RuntimeError,
+    runtime::RuntimeError,
+    value::{Fun, UpvalueObj, UpvalueType},
 };
 
 /// Compilation and runtime errors in the Lox VM.

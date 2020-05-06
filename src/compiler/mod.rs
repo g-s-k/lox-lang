@@ -1,6 +1,13 @@
 use std::{convert::TryInto, error, fmt, mem};
 
-use super::{Fun, Op, ScanError, Scanner, Token, TokenType, Value};
+mod scanner;
+mod token;
+
+use {
+    super::{Fun, Op, Value},
+    scanner::{ScanError, Scanner},
+    token::{Token, TokenType},
+};
 
 type MaybeToken<'a> = Option<Result<Token<'a>, ScanError>>;
 
@@ -79,19 +86,19 @@ impl fmt::Display for CompileErrorType {
 }
 
 macro_rules! short_or_long {
-    ( $value: expr; $short: ident <> $long: ident ) => {{
+    ( $value: expr; $short: ident <> $long: ident $(, $extra: expr)? ) => {{
         match $value.try_into() {
-            Ok(v) => Op::$short(v),
-            Err(_) => Op::$long($value as u16),
+            Ok(v) => Op::$short(v $(, $extra)?),
+            Err(_) => Op::$long($value as u16 $(, $extra)?),
         }
     }};
 }
 
 macro_rules! emit {
-    (const $c: ident : $short: ident / $long: ident, $val: expr ) => {{
+    (const $c: ident : $short: ident / $long: ident, $val: expr $(, $extra: expr)? ) => {{
         let index = $c.fun.inner.chunk.add_constant($val);
         $c.fun.inner.chunk.write(
-            short_or_long!(index; $short <> $long),
+            short_or_long!(index; $short <> $long $(, $extra)?),
             $c.parser.line
         );
     }};
@@ -125,12 +132,87 @@ enum FunType {
     Function,
 }
 
+struct Local<'compile> {
+    name: &'compile str,
+    depth: usize,
+    is_defined: bool,
+    is_captured: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct Upvalue {
+    pub index: usize,
+    pub is_local: bool,
+}
+
 struct FunWrapper<'compile> {
     enclosing: Option<Box<FunWrapper<'compile>>>,
     inner: Fun,
     r#type: FunType,
-    locals: Vec<(&'compile str, Option<usize>)>,
+    locals: Vec<Local<'compile>>,
+    upvalues: Vec<Upvalue>,
     scope_depth: usize,
+}
+
+impl<'compile> FunWrapper<'compile> {
+    fn new<T: ToString>(name: T, r#type: FunType) -> Self {
+        Self {
+            enclosing: None,
+            inner: Fun::new(name, 0),
+            r#type,
+            locals: vec![Local {
+                name: "",
+                depth: 0,
+                is_defined: true,
+                is_captured: false,
+            }],
+            upvalues: Vec::new(),
+            scope_depth: 0,
+        }
+    }
+
+    fn resolve_local(&self, query: &str) -> Option<(usize, bool)> {
+        for (
+            index,
+            Local {
+                name, is_defined, ..
+            },
+        ) in self.locals.iter().enumerate().rev()
+        {
+            if *name == query {
+                return Some((index, *is_defined));
+            }
+        }
+
+        None
+    }
+
+    fn resolve_upvalue(&mut self, query: &str) -> Option<usize> {
+        if let Some(parent) = &mut self.enclosing {
+            if let Some((index, _)) = parent.resolve_local(query) {
+                parent.locals[index].is_captured = true;
+                return Some(self.add_upvalue(index, true));
+            } else if let Some(index) = parent.resolve_upvalue(query) {
+                return Some(self.add_upvalue(index, false));
+            }
+        }
+
+        None
+    }
+
+    fn add_upvalue(&mut self, local_index: usize, is_local: bool) -> usize {
+        for (idx, u_val) in self.upvalues.iter().enumerate() {
+            if u_val.index == local_index && u_val.is_local == is_local {
+                return idx;
+            }
+        }
+
+        self.upvalues.push(Upvalue {
+            index: local_index,
+            is_local,
+        });
+        self.upvalues.len() - 1
+    }
 }
 
 pub(crate) struct Compiler<'compile> {
@@ -158,13 +240,7 @@ impl<'compile> Compiler<'compile> {
                 panic_mode: false,
             },
             errors: Vec::new(),
-            fun: Box::new(FunWrapper {
-                enclosing: None,
-                inner: Fun::new("script", 0),
-                r#type: FunType::Script,
-                locals: vec![("", Some(0))],
-                scope_depth: 0,
-            }),
+            fun: Box::new(FunWrapper::new("script", FunType::Script)),
         };
 
         compiler.advance();
@@ -306,16 +382,8 @@ impl<'compile> Compiler<'compile> {
             })) => text.to_string().into_boxed_str(),
             _ => unreachable!("cannot compile a function without a name"),
         };
-        let old_fun_wrapper = mem::replace(
-            &mut self.fun,
-            Box::new(FunWrapper {
-                enclosing: None,
-                inner: Fun::new(fun_name, 0),
-                r#type,
-                locals: vec![("", Some(0))],
-                scope_depth: 0,
-            }),
-        );
+        let old_fun_wrapper =
+            mem::replace(&mut self.fun, Box::new(FunWrapper::new(fun_name, r#type)));
         self.fun.enclosing = Some(old_fun_wrapper);
 
         self.begin_scope();
@@ -366,10 +434,10 @@ impl<'compile> Compiler<'compile> {
         // pop from head of list and insert into constant table
         if let Some(enclosing_fun) = self.fun.enclosing.take() {
             let this_fun = mem::replace(&mut self.fun, enclosing_fun);
-            emit!(
-                const self: Constant / ConstantLong,
-                Value::Fun(Box::into_raw(Box::new(this_fun.inner)))
-            );
+            // TODO memory leaks
+            let fun_value = Value::Fun(Box::leak(Box::new(this_fun.inner)));
+            let upvalues = Box::leak(this_fun.upvalues.into_boxed_slice());
+            emit!(const self: Closure / ClosureLong, fun_value, upvalues);
         } else {
             // should be infallible, enforce with runtime assertion
             unreachable!();
@@ -406,16 +474,8 @@ impl<'compile> Compiler<'compile> {
             .locals
             .iter()
             .rev()
-            .take_while(|(_, other_depth)| {
-                if let Some(d) = other_depth {
-                    if *d < self.fun.scope_depth {
-                        return false;
-                    }
-                }
-
-                true
-            })
-            .any(|(n, _)| *n == name)
+            .take_while(|l| l.depth >= self.fun.scope_depth)
+            .any(|l| l.name == name)
         {
             self.error(CompileErrorType::DuplicateLocal(name.to_string()));
         }
@@ -424,7 +484,12 @@ impl<'compile> Compiler<'compile> {
     }
 
     fn add_local(&mut self, name: &'compile str) {
-        self.fun.locals.push((name, None));
+        self.fun.locals.push(Local {
+            name,
+            depth: self.fun.scope_depth,
+            is_defined: false,
+            is_captured: false,
+        });
     }
 
     fn var_declaration(&mut self) {
@@ -456,8 +521,9 @@ impl<'compile> Compiler<'compile> {
 
     fn mark_last_local_initialized(&mut self) {
         if self.fun.scope_depth > 0 {
-            let last_idx = self.fun.locals.len() - 1;
-            self.fun.locals[last_idx].1 = Some(self.fun.scope_depth);
+            if let Some(last) = self.fun.locals.last_mut() {
+                last.is_defined = true;
+            }
         }
     }
 
@@ -485,22 +551,15 @@ impl<'compile> Compiler<'compile> {
     fn end_scope(&mut self) {
         self.fun.scope_depth -= 1;
 
-        let mut num_to_pop = 0;
-        for (_, depth) in self.fun.locals.iter().rev() {
-            if let Some(d) = depth {
-                if *d <= self.fun.scope_depth {
-                    break;
-                }
+        for local in self.fun.locals.iter().rev() {
+            if local.depth < self.fun.scope_depth {
+                break;
             }
 
-            num_to_pop += 1;
-        }
-
-        if num_to_pop > 0 {
-            self.fun.locals.truncate(self.fun.locals.len() - num_to_pop);
-            {
-                #![allow(clippy::cast_possible_truncation)]
-                emit!(self, Op::PopN(num_to_pop as u8));
+            if local.is_captured {
+                emit!(self, Op::CloseUpvalue);
+            } else {
+                emit!(self, Op::Pop);
             }
         }
     }
@@ -812,29 +871,31 @@ impl<'compile> Compiler<'compile> {
 
             if let Some(idx) = resolved_index {
                 emit!(self, short_or_long!(idx; SetLocal <> SetLocalLong));
+            } else if let Some(idx) = self.fun.resolve_upvalue(name) {
+                emit!(self, short_or_long!(idx; SetUpvalue <> SetUpvalueLong));
             } else {
                 emit!(const self: SetGlobal / SetGlobalLong, value_maker());
             }
         // "Get" expression
         } else if let Some(idx) = resolved_index {
             emit!(self, short_or_long!(idx; GetLocal <> GetLocalLong));
+        } else if let Some(idx) = self.fun.resolve_upvalue(name) {
+            emit!(self, short_or_long!(idx; GetUpvalue <> GetUpvalueLong));
         } else {
             emit!(const self: GetGlobal / GetGlobalLong, value_maker());
         }
     }
 
     fn resolve_local(&mut self, query: &str) -> Option<usize> {
-        for (index, (name, maybe_depth)) in self.fun.locals.iter().enumerate().rev() {
-            if *name == query {
-                if maybe_depth.is_none() {
-                    self.error(CompileErrorType::ReadBeforeDefined(query.to_string()));
-                }
-
-                return Some(index);
+        if let Some((index, is_defined)) = self.fun.resolve_local(query) {
+            if !is_defined {
+                self.error(CompileErrorType::ReadBeforeDefined(query.to_string()));
             }
-        }
 
-        None
+            Some(index)
+        } else {
+            None
+        }
     }
 
     fn and(&mut self, _: bool) {

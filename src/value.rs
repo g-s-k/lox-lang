@@ -40,7 +40,6 @@ use super::{Chunk, RuntimeError};
 ///     "what is old becomes old again\n"
 /// );
 /// ```
-
 pub type NativeFun = fn(args: &[Value]) -> Result<Value, Box<dyn error::Error>>;
 
 /// Underlying representation of runtime values in Lox.
@@ -52,7 +51,9 @@ pub enum Value {
     Number(f64),
     r#String(Box<str>),
     #[doc(hidden)]
-    Fun(*const Fun),
+    Fun(&'static Fun),
+    #[doc(hidden)]
+    Closure(&'static Fun, &'static [*mut upvalue::Obj]),
     NativeFun(NativeFun),
 }
 
@@ -63,7 +64,8 @@ impl fmt::Display for Value {
             Self::Boolean(b) => write!(f, "{}", b),
             Self::Number(v) => write!(f, "{}", v),
             Self::r#String(s) => write!(f, "{}", s),
-            Self::Fun(fobj) => unsafe { write!(f, "{}", &**fobj) },
+            Self::Fun(fun) => write!(f, "{}", fun),
+            Self::Closure(fun, _) => write!(f, "{}", fun),
             Self::NativeFun(_) => write!(f, "#<native fun>"),
         }
     }
@@ -76,7 +78,8 @@ impl fmt::Debug for Value {
             Self::Boolean(b) => write!(f, "Boolean({})", b),
             Self::Number(v) => write!(f, "Number({})", v),
             Self::r#String(s) => write!(f, "String({})", s),
-            Self::Fun(fobj) => unsafe { write!(f, "Fun({})", &**fobj) },
+            Self::Fun(fun) => write!(f, "Fun({})", fun),
+            Self::Closure(fun, upvals) => write!(f, "Closure({}, {:#?})", fun, upvals),
             Self::NativeFun(ptr) => write!(f, "NativeFun({:p})", ptr),
         }
     }
@@ -89,13 +92,10 @@ impl cmp::PartialEq for Value {
             (Self::Boolean(a), Self::Boolean(b)) => a == b,
             (Self::Number(a), Self::Number(b)) => a == b,
             (Self::r#String(a), Self::r#String(b)) => a == b,
-            (Self::Fun(a), Self::Fun(b)) => a == b,
             _ => false,
         }
     }
 }
-
-type OpResult = Result<Value, RuntimeError>;
 
 impl Value {
     pub(crate) fn is_falsey(&self) -> bool {
@@ -105,7 +105,7 @@ impl Value {
         }
     }
 
-    pub(crate) fn negate(self) -> OpResult {
+    pub(crate) fn negate(self) -> Result<Value, RuntimeError> {
         if let Self::Number(a) = self {
             Ok(Self::Number(-a))
         } else {
@@ -116,9 +116,9 @@ impl Value {
 
 #[derive(Clone, Debug)]
 pub struct Fun {
-    pub(crate) chunk: Chunk,
     pub(crate) name: Box<str>,
     pub(crate) arity: u8,
+    pub(crate) chunk: Chunk,
 }
 
 impl fmt::Display for Fun {
@@ -134,5 +134,55 @@ impl Fun {
             name: name.to_string().into_boxed_str(),
             chunk: Chunk::new(name),
         }
+    }
+}
+
+pub use upvalue::{Obj as UpvalueObj, Type as UpvalueType};
+
+mod upvalue {
+    use std::mem;
+
+    #[derive(Clone, Debug)]
+    pub struct Obj {
+        pub(crate) next: Option<Box<Obj>>,
+        pub(crate) value: Type,
+    }
+
+    impl Obj {
+        pub fn new(index: usize) -> Self {
+            Self {
+                next: None,
+                value: Type::Live(index),
+            }
+        }
+
+        fn prepend(self, head: &mut Option<Box<Self>>) -> *mut Self {
+            let old_head = mem::replace(head, Some(Box::new(self)));
+
+            if let Some(ref mut new_head) = head {
+                new_head.next = old_head;
+                &mut **new_head
+            } else {
+                unreachable!();
+            }
+        }
+
+        pub fn insert_live(head: &mut Option<Box<Self>>, slot: usize) -> *mut Self {
+            if let Some(inner) = head {
+                match inner.value {
+                    Type::Live(c) if c == slot => &mut **inner,
+                    Type::Live(c) if c < slot => Self::new(slot).prepend(head),
+                    _ => Self::insert_live(&mut inner.next, slot),
+                }
+            } else {
+                Self::new(slot).prepend(head)
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    pub enum Type {
+        Live(usize),
+        Captured(*mut super::Value),
     }
 }
