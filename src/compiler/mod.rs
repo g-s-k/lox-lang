@@ -220,8 +220,10 @@ pub(crate) struct Compiler<'compile> {
     parser: Parser<'compile>,
     errors: Vec<CompileError>,
     fun: Box<FunWrapper<'compile>>,
+    alloc: AllocFn<'compile>,
 }
 
+type AllocFn<'compile> = &'compile mut dyn FnMut(Fun) -> Value;
 type ParseFn<'compile> = fn(&mut Compiler<'compile>, bool);
 type Rule<'compile> = (
     Option<ParseFn<'compile>>,
@@ -230,7 +232,10 @@ type Rule<'compile> = (
 );
 
 impl<'compile> Compiler<'compile> {
-    pub fn compile(source: &'compile str) -> Result<Fun, Vec<CompileError>> {
+    pub fn compile(
+        source: &'compile str,
+        alloc: AllocFn<'compile>,
+    ) -> Result<Fun, Vec<CompileError>> {
         let mut compiler = Self {
             scanner: Scanner::new(source),
             parser: Parser {
@@ -241,6 +246,7 @@ impl<'compile> Compiler<'compile> {
             },
             errors: Vec::new(),
             fun: Box::new(FunWrapper::new("script", FunType::Script)),
+            alloc,
         };
 
         compiler.advance();
@@ -434,8 +440,9 @@ impl<'compile> Compiler<'compile> {
         // pop from head of list and insert into constant table
         if let Some(enclosing_fun) = self.fun.enclosing.take() {
             let this_fun = mem::replace(&mut self.fun, enclosing_fun);
-            // TODO memory leak
-            let fun_value = Value::Fun(Box::into_raw(Box::new(this_fun.inner)));
+
+            let fun_value = (self.alloc)(this_fun.inner);
+
             if this_fun.upvalues.is_empty() {
                 emit!(const self: Constant / ConstantLong, fun_value)
             } else {

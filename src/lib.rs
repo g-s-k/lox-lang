@@ -32,8 +32,8 @@ use std::{convert::From, error, fmt};
 
 mod chunk;
 mod compiler;
-mod heap;
 mod list;
+mod obj;
 mod ops;
 mod runtime;
 mod value;
@@ -44,10 +44,10 @@ pub use value::{NativeFun, Value};
 use {
     chunk::Chunk,
     compiler::{CompileError, CompileErrorType, Compiler, Upvalue},
-    heap::{UpvalueType, GC},
     list::List,
+    obj::Gc,
     ops::Op,
-    runtime::RuntimeError,
+    runtime::{RuntimeError, UpvalueRef},
     value::Fun,
 };
 

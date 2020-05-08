@@ -1,6 +1,6 @@
-use std::{cmp, error, fmt};
+use std::{any::Any, cmp, error, fmt};
 
-use super::{Chunk, RuntimeError, UpvalueType};
+use super::{Chunk, Gc, RuntimeError, UpvalueRef};
 
 /// Underlying representation of runtime values in Lox.
 #[derive(Clone)]
@@ -11,9 +11,9 @@ pub enum Value {
     Number(f64),
     r#String(Box<str>),
     #[doc(hidden)]
-    Fun(*const Fun),
+    Fun(Gc<Fun>),
     #[doc(hidden)]
-    Closure(*const Fun, Box<[*mut UpvalueType]>),
+    Closure(Gc<Fun>, Box<[Gc<UpvalueRef>]>),
     NativeFun(NativeFun),
 }
 
@@ -24,8 +24,8 @@ impl fmt::Display for Value {
             Self::Boolean(b) => write!(f, "{}", b),
             Self::Number(v) => write!(f, "{}", v),
             Self::r#String(s) => write!(f, "{}", s),
-            Self::Fun(fun) => write!(f, "{}", unsafe { &**fun }),
-            Self::Closure(fun, _) => write!(f, "{}", unsafe { &**fun }),
+            Self::Fun(fun) => write!(f, "{}", **fun),
+            Self::Closure(fun, _) => write!(f, "{}", **fun),
             Self::NativeFun(_) => write!(f, "#<native fun>"),
         }
     }
@@ -38,10 +38,8 @@ impl fmt::Debug for Value {
             Self::Boolean(b) => write!(f, "Boolean({})", b),
             Self::Number(v) => write!(f, "Number({})", v),
             Self::r#String(s) => write!(f, "String({})", s),
-            Self::Fun(fun) => write!(f, "Fun({})", unsafe { &**fun }),
-            Self::Closure(fun, upvals) => {
-                write!(f, "Closure({}, {:#?})", unsafe { &**fun }, upvals)
-            }
+            Self::Fun(fun) => write!(f, "Fun({})", **fun),
+            Self::Closure(fun, upvals) => write!(f, "Closure({}, {:#?})", **fun, upvals),
             Self::NativeFun(ptr) => write!(f, "NativeFun({:p})", ptr),
         }
     }
@@ -72,6 +70,25 @@ impl Value {
             Ok(Self::Number(-a))
         } else {
             Err(RuntimeError::ArgumentTypes)
+        }
+    }
+
+    pub(crate) fn mark(&self, grays: &mut Vec<Gc<dyn Any>>) {
+        match self {
+            Self::Fun(f) => {
+                f.mark();
+                grays.push(f.clone().into());
+            }
+            Self::Closure(f, u) => {
+                f.mark();
+                grays.push(f.clone().into());
+
+                for u_val in u.iter() {
+                    u_val.mark();
+                    grays.push(u_val.clone().into());
+                }
+            }
+            _ => (),
         }
     }
 }

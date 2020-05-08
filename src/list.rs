@@ -1,99 +1,130 @@
-use std::{
-    mem,
-    ops::{Deref, DerefMut},
-};
+//! general purpose linked list
+//!
+//! mostly cribbed from the immortal [Rust in Entirely Too Many Linked
+//! Lists](https://rust-unofficial.github.io/too-many-lists) but improved with reference passing
+//! and utility methods to get, insert, and delete conditionally
 
 #[derive(Debug)]
 pub(crate) struct List<T> {
-    next: Option<Box<List<T>>>,
-    item: Box<T>,
+    head: Option<Box<Node<T>>>,
+}
+
+#[derive(Debug)]
+struct Node<T> {
+    item: T,
+    next: Option<Box<Node<T>>>,
 }
 
 impl<T> List<T> {
-    pub(crate) fn push(list: &mut Option<Box<Self>>, value: T) -> *mut T {
-        let old_head = list.take();
-        let new_head = Self {
-            next: old_head,
-            item: Box::new(value),
-        };
-        &mut *list.get_or_insert(Box::new(new_head)).item
+    pub(crate) fn new() -> Self {
+        Self { head: None }
     }
 
-    pub(crate) fn pop(list: &mut Option<Box<Self>>) -> Option<Box<T>> {
-        if let Some(node) = list.take() {
-            mem::replace(list, node.next);
-            Some(node.item)
-        } else {
-            None
-        }
+    #[allow(dead_code)]
+    pub(crate) fn peek(&self) -> Option<&T> {
+        self.head.as_ref().map(|node| &node.item)
     }
 
-    pub(crate) fn insert_before<F>(list: &mut Option<Box<Self>>, value: T, predicate: F) -> *mut T
+    #[allow(dead_code)]
+    pub(crate) fn peek_mut(&mut self) -> Option<&mut T> {
+        self.head.as_mut().map(|node| &mut node.item)
+    }
+
+    pub(crate) fn push(&mut self, item: T) -> &mut T {
+        Node::splice_in(&mut self.head, item)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn pop(&mut self) -> Option<T> {
+        self.head.take().map(|node| node.item)
+    }
+
+    pub(crate) fn insert_before<F>(&mut self, value: T, predicate: F) -> &mut T
     where
         F: Fn(&T) -> bool,
     {
-        match list {
-            None => Self::push(list, value),
-            Some(ref head) if predicate(&head.item) => Self::push(list, value),
-            Some(ref mut head) => match &head.next {
-                None => Self::push(&mut head.next, value),
-                Some(tail_first) if predicate(&tail_first.item) => {
-                    Self::push(&mut head.next, value)
-                }
-                Some(_) => Self::insert_before(&mut head.next, value, predicate),
-            },
+        let mut current = &mut self.head;
+
+        while current
+            .as_ref()
+            .filter(|node| predicate(&node.item))
+            .is_some()
+        {
+            current = &mut current.as_mut().unwrap().next;
         }
+
+        Node::splice_in(current, value)
     }
 
-    pub(crate) fn get<F>(list: &Option<Box<Self>>, predicate: F) -> Option<*const T>
+    pub(crate) fn find<F>(&self, predicate: F) -> Option<&T>
     where
         F: Fn(&T) -> bool,
     {
-        match list {
-            Some(head) => {
-                if predicate(&head.item) {
-                    Some(&*head.item)
-                } else {
-                    Self::get(&head.next, predicate)
-                }
+        let mut current = &self.head;
+
+        while let Some(ref head) = &current {
+            if predicate(&head.item) {
+                break;
             }
-            None => None,
+
+            current = &head.next;
         }
+
+        current.as_ref().map(|node| &node.item)
     }
 
-    pub(crate) fn get_mut<F>(list: &mut Option<Box<Self>>, predicate: F) -> Option<*mut T>
+    pub(crate) fn retain<F>(&mut self, predicate: F) -> Vec<T>
     where
         F: Fn(&T) -> bool,
     {
-        match list {
-            Some(ref mut head) => {
-                if predicate(&head.item) {
-                    Some(&mut *head.item)
-                } else {
-                    Self::get_mut(&mut head.next, predicate)
-                }
+        let mut out = Vec::new();
+
+        let mut current = &mut self.head;
+
+        while current.is_some() {
+            if current
+                .as_ref()
+                .filter(|node| predicate(&node.item))
+                .is_some()
+            {
+                current = &mut current.as_mut().unwrap().next;
+            } else if let Some(to_remove) = current.take() {
+                *current = to_remove.next;
+                out.push(to_remove.item);
             }
-            None => None,
+        }
+
+        out
+    }
+
+    pub(crate) fn iter(&self) -> Iter<'_, T> {
+        Iter {
+            next: self.head.as_ref().map(|node| &**node),
         }
     }
 }
 
-impl<T> AsRef<T> for List<T> {
-    fn as_ref(&self) -> &T {
-        &self.item
+pub(crate) struct Iter<'a, T> {
+    next: Option<&'a Node<T>>,
+}
+
+impl<'a, T> Iterator for Iter<'a, T> {
+    type Item = &'a T;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next.map(|node| {
+            self.next = node.next.as_ref().map(|node| &**node);
+            &node.item
+        })
     }
 }
 
-impl<T> Deref for List<T> {
-    type Target = T;
+impl<T> Node<T> {
+    fn splice_in(maybe_node: &mut Option<Box<Self>>, item: T) -> &mut T {
+        let new_node = Box::new(Node {
+            item,
+            next: maybe_node.take().and_then(|mut node| node.next.take()),
+        });
 
-    fn deref(&self) -> &Self::Target {
-        &self.item
-    }
-}
-
-impl<T> DerefMut for List<T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.item
+        &mut maybe_node.get_or_insert(new_node).item
     }
 }
