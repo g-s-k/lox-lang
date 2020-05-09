@@ -48,7 +48,7 @@ use {
     obj::Gc,
     ops::Op,
     runtime::{RuntimeError, UpvalueRef},
-    value::Fun,
+    value::{Class, Fun, Instance},
 };
 
 /// Compilation and runtime errors in the Lox VM.

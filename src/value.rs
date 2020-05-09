@@ -1,4 +1,4 @@
-use std::{any::Any, cmp, error, fmt};
+use std::{any::Any, cmp, collections::HashMap, error, fmt};
 
 use super::{Chunk, Gc, RuntimeError, UpvalueRef};
 
@@ -14,6 +14,8 @@ pub enum Value {
     Fun(Gc<Fun>),
     #[doc(hidden)]
     Closure(Gc<Fun>, Box<[Gc<UpvalueRef>]>),
+    Class(Gc<Class>),
+    Instance(Gc<Instance>),
     NativeFun(NativeFun),
 }
 
@@ -26,6 +28,8 @@ impl fmt::Display for Value {
             Self::r#String(s) => write!(f, "{}", s),
             Self::Fun(fun) => write!(f, "{}", **fun),
             Self::Closure(fun, _) => write!(f, "{}", **fun),
+            Self::Class(c) => write!(f, "{}", **c),
+            Self::Instance(i) => write!(f, "{} instance", *i.class),
             Self::NativeFun(_) => write!(f, "#<native fun>"),
         }
     }
@@ -40,6 +44,8 @@ impl fmt::Debug for Value {
             Self::r#String(s) => write!(f, "String({})", s),
             Self::Fun(fun) => write!(f, "Fun({})", **fun),
             Self::Closure(fun, upvals) => write!(f, "Closure({}, {:#?})", **fun, upvals),
+            Self::Class(c) => write!(f, "Class({})", **c),
+            Self::Instance(i) => write!(f, "Instance({:?})", i),
             Self::NativeFun(ptr) => write!(f, "NativeFun({:p})", ptr),
         }
     }
@@ -88,6 +94,14 @@ impl Value {
                     grays.push(u_val.clone().into());
                 }
             }
+            Self::Class(c) => {
+                c.mark();
+                grays.push(c.clone().into());
+            }
+            Self::Instance(i) => {
+                i.mark();
+                grays.push(i.clone().into());
+            }
             _ => (),
         }
     }
@@ -112,6 +126,40 @@ impl Fun {
             arity,
             name: name.to_string().into_boxed_str(),
             chunk: Chunk::new(name),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Class {
+    name: Box<str>,
+}
+
+impl Class {
+    pub(crate) fn new<T: ToString>(name: T) -> Self {
+        Self {
+            name: name.to_string().into_boxed_str(),
+        }
+    }
+}
+
+impl fmt::Display for Class {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self.name)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Instance {
+    pub(crate) class: Gc<Class>,
+    pub(crate) fields: HashMap<Box<str>, Value>,
+}
+
+impl Instance {
+    pub(crate) fn new(class: Gc<Class>) -> Self {
+        Self {
+            class,
+            fields: HashMap::new(),
         }
     }
 }

@@ -29,6 +29,10 @@ pub(crate) enum Op {
     GetUpvalueLong(u16),
     SetUpvalue(u8),
     SetUpvalueLong(u16),
+    GetProperty(u8),
+    GetPropertyLong(u16),
+    SetProperty(u8),
+    SetPropertyLong(u16),
 
     // operators
     Equal,
@@ -51,6 +55,8 @@ pub(crate) enum Op {
     ClosureLong(u16, Box<[Upvalue]>),
     CloseUpvalue,
     Return,
+    Class(u8),
+    ClassLong(u16),
 }
 
 impl Op {
@@ -90,14 +96,21 @@ impl Op {
             Op::Closure(i, u_vals) => closure!(i, u_vals),
             Op::ClosureLong(i, u_vals) => closure!(i, u_vals),
 
-            Op::Constant(i) | Op::GetGlobal(i) | Op::DefineGlobal(i) | Op::SetGlobal(i) => {
-                fmt!(chunk.constants[*i as usize])
-            }
+            Op::Constant(i)
+            | Op::GetGlobal(i)
+            | Op::DefineGlobal(i)
+            | Op::SetGlobal(i)
+            | Op::Class(i)
+            | Op::GetProperty(i)
+            | Op::SetProperty(i) => fmt!(chunk.constants[*i as usize]),
 
             Op::ConstantLong(i)
             | Op::GetGlobalLong(i)
             | Op::DefineGlobalLong(i)
-            | Op::SetGlobalLong(i) => fmt!(chunk.constants[*i as usize]),
+            | Op::SetGlobalLong(i)
+            | Op::ClassLong(i)
+            | Op::GetPropertyLong(i)
+            | Op::SetPropertyLong(i) => fmt!(chunk.constants[*i as usize]),
 
             Op::GetLocalLong(c)
             | Op::SetLocalLong(c)
@@ -146,6 +159,10 @@ impl fmt::Display for Op {
                 Op::GetUpvalueLong(_) => "GET_UPVALUE_LONG",
                 Op::SetUpvalue(_) => "SET_UPVALUE",
                 Op::SetUpvalueLong(_) => "SET_UPVALUE_LONG",
+                Op::GetProperty(_) => "GET_PROPERTY",
+                Op::GetPropertyLong(_) => "GET_PROPERTY_LONG",
+                Op::SetProperty(_) => "SET_PROPERTY",
+                Op::SetPropertyLong(_) => "SET_PROPERTY_LONG",
 
                 Op::Equal => "EQUAL",
                 Op::Greater => "GREATER",
@@ -166,6 +183,8 @@ impl fmt::Display for Op {
                 Op::ClosureLong(_, _) => "CLOSURE_LONG",
                 Op::CloseUpvalue => "CLOSE_UPVALUE",
                 Op::Return => "RETURN",
+                Op::Class(_) => "CLASS",
+                Op::ClassLong(_) => "CLASS_LONG",
             },
             width = f.width().unwrap_or_default(),
         )

@@ -42,6 +42,8 @@ pub enum CompileErrorType {
     MissingPrefixExpr,
     MissingSemi,
     MissingVarName,
+    MissingClassName,
+    MissingPropertyName,
     MissingFunName,
     MissingParamName,
     TooManyParams,
@@ -66,6 +68,8 @@ impl fmt::Display for CompileErrorType {
             MissingPrefixExpr => write!(f, "expected expression"),
             MissingSemi => write!(f, "expected ';' after statement"),
             MissingVarName => write!(f, "expect variable name"),
+            MissingClassName => write!(f, "expect class name"),
+            MissingPropertyName => write!(f, "expect property name after '.'"),
             MissingFunName => write!(f, "expect function name"),
             MissingParamName => write!(f, "expect parameter name"),
             TooManyParams => write!(f, "cannot exceed 255 parameters"),
@@ -220,10 +224,10 @@ pub(crate) struct Compiler<'compile> {
     parser: Parser<'compile>,
     errors: Vec<CompileError>,
     fun: Box<FunWrapper<'compile>>,
-    alloc: AllocFn<'compile>,
+    alloc: Alloc<'compile>,
 }
 
-type AllocFn<'compile> = &'compile mut dyn FnMut(Fun) -> Value;
+type Alloc<'compile> = &'compile mut dyn FnMut(Fun) -> Value;
 type ParseFn<'compile> = fn(&mut Compiler<'compile>, bool);
 type Rule<'compile> = (
     Option<ParseFn<'compile>>,
@@ -234,7 +238,7 @@ type Rule<'compile> = (
 impl<'compile> Compiler<'compile> {
     pub fn compile(
         source: &'compile str,
-        alloc: AllocFn<'compile>,
+        alloc: Alloc<'compile>,
     ) -> Result<Fun, Vec<CompileError>> {
         let mut compiler = Self {
             scanner: Scanner::new(source),
@@ -355,6 +359,10 @@ impl<'compile> Compiler<'compile> {
 
     fn declaration(&mut self) {
         match self.parser.current_type() {
+            Some(TokenType::Class) => {
+                self.advance();
+                self.class_declaration();
+            }
             Some(TokenType::Fun) => {
                 self.advance();
                 self.fun_declaration();
@@ -369,6 +377,24 @@ impl<'compile> Compiler<'compile> {
         if self.parser.panic_mode {
             self.synchronize();
         }
+    }
+
+    fn class_declaration(&mut self) {
+        let name_idx = self.parse_variable(CompileErrorType::MissingClassName);
+        emit!(self, short_or_long!(name_idx; Class <> ClassLong));
+        self.define_variable(name_idx);
+
+        // {
+        self.consume(
+            TokenType::LeftBrace,
+            CompileErrorType::MissingLeftBrace("before class body"),
+        );
+
+        // }
+        self.consume(
+            TokenType::RightBrace,
+            CompileErrorType::MissingRightBrace("after class body"),
+        );
     }
 
     fn fun_declaration(&mut self) {
@@ -970,6 +996,24 @@ impl<'compile> Compiler<'compile> {
         arg_count
     }
 
+    fn dot(&mut self, can_assign: bool) {
+        let property_idx = self.parse_variable(CompileErrorType::MissingPropertyName);
+
+        if can_assign && self.parser.current_type() == Some(TokenType::Equal) {
+            self.advance();
+            self.expression();
+            emit!(
+                self,
+                short_or_long!(property_idx; SetProperty <> SetPropertyLong)
+            );
+        } else {
+            emit!(
+                self,
+                short_or_long!(property_idx; GetProperty <> GetPropertyLong)
+            );
+        }
+    }
+
     fn get_rule(sigil: TokenType) -> Rule<'compile> {
         match sigil {
             TokenType::LeftParen => (Some(Self::grouping), Some(Self::call), Precedence::Call),
@@ -992,6 +1036,7 @@ impl<'compile> Compiler<'compile> {
             TokenType::False | TokenType::Nil | TokenType::True => {
                 (Some(Self::literal), None, Precedence::None)
             }
+            TokenType::Dot => (None, Some(Self::dot), Precedence::Call),
             _ => (None, None, Precedence::None),
         }
     }

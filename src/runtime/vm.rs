@@ -9,7 +9,7 @@ use std::{
 
 use {
     super::{CallFrame, RuntimeError, UpvalueRef},
-    crate::{Compiler, Error, Fun, Gc, List, Op, Upvalue, Value},
+    crate::{Class, Compiler, Error, Fun, Gc, Instance, List, Op, Upvalue, Value},
 };
 
 /// The Lox virtual machine.
@@ -68,16 +68,14 @@ impl<'writer, 'source> VM<'writer> {
     pub fn interpret<T: AsRef<str> + 'source>(&mut self, source: T) -> Result<(), Vec<Error>> {
         self.compiler_roots.clear();
 
-        let mut alloc_fun = |f| {
+        let fun = Compiler::compile(source.as_ref(), &mut |f| {
             let val = Value::Fun(self.alloc(f));
             self.compiler_roots.push(val.clone());
             val
-        };
+        })
+        .map_err(|errs| errs.into_iter().map(Into::into).collect::<Vec<_>>())?;
 
-        let fun = Compiler::compile(source.as_ref(), &mut alloc_fun)
-            .map_err(|errs| errs.into_iter().map(Into::into).collect::<Vec<_>>())?;
-
-        let fun = alloc_fun(fun);
+        let fun = Value::Fun(self.alloc(fun));
 
         self.stack.push(fun);
         self.compiler_roots.clear();
@@ -172,6 +170,10 @@ impl<'writer, 'source> VM<'writer> {
                 Op::GetUpvalueLong(index) => self.fetch_upvalue(index)?,
                 Op::SetUpvalue(index) => self.set_upvalue(index)?,
                 Op::SetUpvalueLong(index) => self.set_upvalue(index)?,
+                Op::GetProperty(index) => self.get_property(index)?,
+                Op::GetPropertyLong(index) => self.get_property(index)?,
+                Op::SetProperty(index) => self.set_property(index)?,
+                Op::SetPropertyLong(index) => self.set_property(index)?,
                 Op::Equal => {
                     let (a, b) = self.pop_pair()?;
                     self.stack.push(Value::Boolean(b == a));
@@ -239,6 +241,16 @@ impl<'writer, 'source> VM<'writer> {
 
                     self.stack.truncate(base_ptr as usize);
                     self.stack.push(result);
+                }
+                Op::Class(index) => {
+                    let name = self.read_constant(index).clone();
+                    let val = Value::Class(self.alloc(Class::new(name)));
+                    self.stack.push(val);
+                }
+                Op::ClassLong(index) => {
+                    let name = self.read_constant(index).clone();
+                    let val = Value::Class(self.alloc(Class::new(name)));
+                    self.stack.push(val);
                 }
             }
         }
@@ -480,6 +492,44 @@ impl<'writer, 'source> VM<'writer> {
         }
     }
 
+    fn get_property<T: Into<usize> + fmt::Display + Copy>(
+        &mut self,
+        index: T,
+    ) -> Result<(), RuntimeError> {
+        match self.stack.pop() {
+            None => Err(RuntimeError::StackEmpty),
+            Some(Value::Instance(i)) => {
+                let var_str = self.read_string(index);
+                if let Some(val) = i.fields.get(var_str) {
+                    self.stack.push(val.clone());
+                    Ok(())
+                } else {
+                    Err(RuntimeError::UndefinedProperty(var_str.to_string()))
+                }
+            }
+            Some(_) => Err(RuntimeError::ArgumentTypes),
+        }
+    }
+
+    fn set_property<T: Into<usize> + fmt::Display + Copy>(
+        &mut self,
+        index: T,
+    ) -> Result<(), RuntimeError> {
+        let value = self.stack.pop().ok_or(RuntimeError::StackEmpty)?;
+
+        match self.stack.pop() {
+            None => Err(RuntimeError::StackEmpty),
+            Some(Value::Instance(mut i)) => {
+                let var_str = self.read_string(index);
+                i.fields
+                    .insert(var_str.to_string().into_boxed_str(), value.clone());
+                self.stack.push(value);
+                Ok(())
+            }
+            _ => Err(RuntimeError::ArgumentTypes),
+        }
+    }
+
     fn call_value(&mut self, arg_count: u8) -> Result<(), RuntimeError> {
         match self.peek(arg_count.into())? {
             Value::Closure(f, u) => {
@@ -489,6 +539,13 @@ impl<'writer, 'source> VM<'writer> {
             Value::Fun(f) => {
                 let f = f.clone();
                 self.call(f, Box::new([]), arg_count)
+            }
+            Value::Class(c) => {
+                let c = c.clone();
+                self.pop_many(arg_count as u16 + 1)?;
+                let val = Value::Instance(self.alloc(Instance::new(c)));
+                self.stack.push(val);
+                Ok(())
             }
             Value::NativeFun(f) => {
                 let from = self
@@ -630,6 +687,13 @@ impl<'writer, 'source> VM<'writer> {
         } else if let Some(u) = obj.downcast_ref::<UpvalueRef>() {
             if let UpvalueRef::Captured(ref v) = *u {
                 v.mark(gray_stack);
+            }
+        } else if let Some(Instance { class, fields }) = obj.downcast_ref::<Instance>() {
+            class.mark();
+            gray_stack.push(class.clone().into());
+
+            for value in fields.values() {
+                value.mark(gray_stack);
             }
         }
     }
