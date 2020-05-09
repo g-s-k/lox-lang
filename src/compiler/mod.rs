@@ -1,90 +1,76 @@
-use std::{convert::TryInto, error, fmt, mem};
+use std::{convert::TryInto, mem};
 
+mod errors;
 mod scanner;
 mod token;
+mod wrapper;
+
+pub(crate) use {
+    errors::{CompileError, CompileErrorType},
+    wrapper::Upvalue,
+};
 
 use {
     super::{Fun, Op, Value},
     scanner::{ScanError, Scanner},
     token::{Token, TokenType},
+    wrapper::{ClassWrapper, FunType, FunWrapper, Local},
 };
 
 type MaybeToken<'a> = Option<Result<Token<'a>, ScanError>>;
 
-#[derive(Debug)]
-pub(crate) struct CompileError {
-    pub err: CompileErrorType,
-    pub line: usize,
-    text: Option<String>,
+struct Parser<'a> {
+    current: MaybeToken<'a>,
+    previous: MaybeToken<'a>,
+    line: usize,
+    panic_mode: bool,
 }
 
-impl error::Error for CompileError {}
-
-impl fmt::Display for CompileError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "[line {}] Error", self.line)?;
-        if let Some(t) = &self.text {
-            write!(f, " at \"{}\"", t)?;
+impl<'a> Parser<'a> {
+    fn previous_type(&self) -> Option<TokenType> {
+        if let Some(Ok(token)) = &self.previous {
+            Some(token.r#type)
+        } else {
+            None
         }
-        write!(f, ": {}", self.err)
+    }
+
+    fn current_type(&self) -> Option<TokenType> {
+        if let Some(Ok(token)) = &self.current {
+            Some(token.r#type)
+        } else {
+            None
+        }
     }
 }
 
-#[derive(Clone, Debug)]
-pub enum CompileErrorType {
-    // compilation
-    UnexpectedChar,
-    UnterminatedString,
-    MissingLeftParen(&'static str),
-    MissingRightParen(&'static str),
-    MissingLeftBrace(&'static str),
-    MissingRightBrace(&'static str),
-    MissingPrefixExpr,
-    MissingSemi,
-    MissingVarName,
-    MissingClassName,
-    MissingPropertyName,
-    MissingFunName,
-    MissingParamName,
-    TooManyParams,
-    DuplicateLocal(String),
-    ReadBeforeDefined(String),
-    JumpTooLarge(usize),
-    TopLevelReturn,
-    ExpectedEOF,
+#[derive(Clone, Copy, PartialEq, PartialOrd)]
+enum Precedence {
+    None = 0,
+    Assignment,
+    Or,
+    And,
+    Equality,
+    Comparison,
+    Term,
+    Factor,
+    Unary,
+    Call,
+    Primary,
 }
 
-impl fmt::Display for CompileErrorType {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        use CompileErrorType::*;
-
+impl<'a, 'b> Precedence {
+    fn next(self) -> Self {
         match self {
-            UnexpectedChar => write!(f, "unexpected character"),
-            UnterminatedString => write!(f, "unterminated string"),
-            MissingLeftParen(location) => write!(f, "expected '(' {}", location),
-            MissingRightParen(location) => write!(f, "expected ')' {}", location),
-            MissingLeftBrace(location) => write!(f, "expected '{{' {}", location),
-            MissingRightBrace(location) => write!(f, "expected '}}' {}", location),
-            MissingPrefixExpr => write!(f, "expected expression"),
-            MissingSemi => write!(f, "expected ';' after statement"),
-            MissingVarName => write!(f, "expect variable name"),
-            MissingClassName => write!(f, "expect class name"),
-            MissingPropertyName => write!(f, "expect property name after '.'"),
-            MissingFunName => write!(f, "expect function name"),
-            MissingParamName => write!(f, "expect parameter name"),
-            TooManyParams => write!(f, "cannot exceed 255 parameters"),
-            DuplicateLocal(who) => write!(f, "variable `{}` already declared in this scope", who),
-            ReadBeforeDefined(who) => {
-                write!(f, "tried to use variable `{}` in its own initializer", who)
-            }
-            JumpTooLarge(distance) => write!(
-                f,
-                "jump distance {:x} is too large to fit in a `u16` (max value {:x})",
-                distance,
-                u16::MAX
-            ),
-            TopLevelReturn => write!(f, "return statement outside a function body"),
-            ExpectedEOF => write!(f, "expected end of input"),
+            Self::None => Self::Assignment,
+            Self::Assignment => Self::Or,
+            Self::Or => Self::And,
+            Self::Equality => Self::Comparison,
+            Self::Comparison => Self::Term,
+            Self::Term => Self::Factor,
+            Self::Factor => Self::Unary,
+            Self::Unary => Self::Call,
+            _ => Self::Primary,
         }
     }
 }
@@ -131,99 +117,12 @@ macro_rules! emit {
     }};
 }
 
-enum FunType {
-    Script,
-    Function,
-}
-
-struct Local<'compile> {
-    name: &'compile str,
-    depth: usize,
-    is_defined: bool,
-    is_captured: bool,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct Upvalue {
-    pub index: usize,
-    pub is_local: bool,
-}
-
-struct FunWrapper<'compile> {
-    enclosing: Option<Box<FunWrapper<'compile>>>,
-    inner: Fun,
-    r#type: FunType,
-    locals: Vec<Local<'compile>>,
-    upvalues: Vec<Upvalue>,
-    scope_depth: usize,
-}
-
-impl<'compile> FunWrapper<'compile> {
-    fn new<T: ToString>(name: T, r#type: FunType) -> Self {
-        Self {
-            enclosing: None,
-            inner: Fun::new(name, 0),
-            r#type,
-            locals: vec![Local {
-                name: "",
-                depth: 0,
-                is_defined: true,
-                is_captured: false,
-            }],
-            upvalues: Vec::new(),
-            scope_depth: 0,
-        }
-    }
-
-    fn resolve_local(&self, query: &str) -> Option<(usize, bool)> {
-        for (
-            index,
-            Local {
-                name, is_defined, ..
-            },
-        ) in self.locals.iter().enumerate().rev()
-        {
-            if *name == query {
-                return Some((index, *is_defined));
-            }
-        }
-
-        None
-    }
-
-    fn resolve_upvalue(&mut self, query: &str) -> Option<usize> {
-        if let Some(parent) = &mut self.enclosing {
-            if let Some((index, _)) = parent.resolve_local(query) {
-                parent.locals[index].is_captured = true;
-                return Some(self.add_upvalue(index, true));
-            } else if let Some(index) = parent.resolve_upvalue(query) {
-                return Some(self.add_upvalue(index, false));
-            }
-        }
-
-        None
-    }
-
-    fn add_upvalue(&mut self, local_index: usize, is_local: bool) -> usize {
-        for (idx, u_val) in self.upvalues.iter().enumerate() {
-            if u_val.index == local_index && u_val.is_local == is_local {
-                return idx;
-            }
-        }
-
-        self.upvalues.push(Upvalue {
-            index: local_index,
-            is_local,
-        });
-        self.upvalues.len() - 1
-    }
-}
-
 pub(crate) struct Compiler<'compile> {
     scanner: Scanner<'compile>,
     parser: Parser<'compile>,
     errors: Vec<CompileError>,
     fun: Box<FunWrapper<'compile>>,
+    class: Option<Box<ClassWrapper>>,
     alloc: Alloc<'compile>,
 }
 
@@ -250,6 +149,7 @@ impl<'compile> Compiler<'compile> {
             },
             errors: Vec::new(),
             fun: Box::new(FunWrapper::new("script", FunType::Script)),
+            class: None,
             alloc,
         };
 
@@ -273,7 +173,7 @@ impl<'compile> Compiler<'compile> {
     }
 
     fn end_function(&mut self) {
-        emit!(self, Op::Nil, Op::Return);
+        self.emit_return();
 
         #[cfg(feature = "trace-compilation")]
         log::debug!("\n{}", self.fun.inner.chunk);
@@ -381,8 +281,28 @@ impl<'compile> Compiler<'compile> {
 
     fn class_declaration(&mut self) {
         let name_idx = self.parse_variable(CompileErrorType::MissingClassName);
+
+        // get class name for later
+        let class_name = if let Some(Ok(Token {
+            r#type: TokenType::Identifier,
+            text,
+            ..
+        })) = self.parser.previous
+        {
+            text
+        } else {
+            unreachable!()
+        };
+
         emit!(self, short_or_long!(name_idx; Class <> ClassLong));
         self.define_variable(name_idx);
+
+        self.class = Some(Box::new(ClassWrapper {
+            enclosing: self.class.take(),
+            name: class_name.to_string().into_boxed_str(),
+        }));
+
+        self.named_variable(class_name, false); // load class object back onto stack
 
         // {
         self.consume(
@@ -390,11 +310,39 @@ impl<'compile> Compiler<'compile> {
             CompileErrorType::MissingLeftBrace("before class body"),
         );
 
+        loop {
+            if let None | Some(TokenType::RightBrace) = self.parser.current_type() {
+                break;
+            }
+
+            self.method();
+        }
+
         // }
         self.consume(
             TokenType::RightBrace,
             CompileErrorType::MissingRightBrace("after class body"),
         );
+
+        emit!(self, Op::Pop);
+
+        if let Some(cls) = self.class.take() {
+            self.class = cls.enclosing;
+        }
+    }
+
+    fn method(&mut self) {
+        let name_idx = self.parse_variable(CompileErrorType::MissingMethodName);
+
+        self.function(
+            if let Some(Ok(Token { text: "init", .. })) = self.parser.previous {
+                FunType::Initializer
+            } else {
+                FunType::Method
+            },
+        );
+
+        emit!(self, short_or_long!(name_idx; Method <> MethodLong));
     }
 
     fn fun_declaration(&mut self) {
@@ -673,12 +621,26 @@ impl<'compile> Compiler<'compile> {
         if let Some(TokenType::Semi) = self.parser.current_type() {
             // no return value
             self.advance();
-            emit!(self, Op::Nil, Op::Return);
+            self.emit_return();
         } else {
+            if let FunType::Initializer = self.fun.r#type {
+                self.error(CompileErrorType::ReturnFromInit);
+            }
+
             self.expression();
             self.consume(TokenType::Semi, CompileErrorType::MissingSemi);
             emit!(self, Op::Return);
         }
+    }
+
+    fn emit_return(&mut self) {
+        if let FunType::Initializer = self.fun.r#type {
+            emit!(self, Op::GetLocal(0));
+        } else {
+            emit!(self, Op::Nil);
+        }
+
+        emit!(self, Op::Return);
     }
 
     fn while_statement(&mut self) {
@@ -887,22 +849,22 @@ impl<'compile> Compiler<'compile> {
         emit!(const self: Constant / ConstantLong, Value::r#String(text_without_quotes))
     }
 
-    fn variable(&mut self, _: bool) {
+    fn variable(&mut self, can_assign: bool) {
         let token_text = if let Some(Ok(Token { text, .. })) = &self.parser.previous {
             (&**text).clone()
         } else {
             unreachable!();
         };
 
-        self.named_variable(token_text);
+        self.named_variable(token_text, can_assign);
     }
 
-    fn named_variable(&mut self, name: &str) {
+    fn named_variable(&mut self, name: &str, can_assign: bool) {
         let resolved_index = self.resolve_local(name);
         let value_maker = || Value::r#String(name.to_string().into_boxed_str());
 
         // "Set" expression
-        if let Some(TokenType::Equal) = self.parser.current_type() {
+        if can_assign && self.parser.current_type() == Some(TokenType::Equal) {
             self.advance();
             self.expression();
 
@@ -997,20 +959,49 @@ impl<'compile> Compiler<'compile> {
     }
 
     fn dot(&mut self, can_assign: bool) {
-        let property_idx = self.parse_variable(CompileErrorType::MissingPropertyName);
-
-        if can_assign && self.parser.current_type() == Some(TokenType::Equal) {
-            self.advance();
-            self.expression();
-            emit!(
-                self,
-                short_or_long!(property_idx; SetProperty <> SetPropertyLong)
-            );
+        self.consume(TokenType::Identifier, CompileErrorType::MissingPropertyName);
+        let property_idx = if let Some(Ok(Token { text, .. })) = self.parser.previous {
+            self.fun
+                .inner
+                .chunk
+                .add_constant(Value::r#String(text.to_string().into_boxed_str()))
         } else {
-            emit!(
-                self,
-                short_or_long!(property_idx; GetProperty <> GetPropertyLong)
-            );
+            unreachable!()
+        };
+
+        match self.parser.current_type() {
+            Some(TokenType::Equal) if can_assign => {
+                self.advance();
+                self.expression();
+                emit!(
+                    self,
+                    short_or_long!(property_idx; SetProperty <> SetPropertyLong)
+                );
+            }
+
+            Some(TokenType::LeftParen) => {
+                self.advance();
+                let arg_count = self.argument_list();
+                emit!(
+                    self,
+                    short_or_long!(property_idx; Invoke <> InvokeLong, arg_count)
+                );
+            }
+
+            _ => {
+                emit!(
+                    self,
+                    short_or_long!(property_idx; GetProperty <> GetPropertyLong)
+                );
+            }
+        }
+    }
+
+    fn this(&mut self, _: bool) {
+        if self.class.is_none() {
+            self.error(CompileErrorType::InvalidThis);
+        } else {
+            self.variable(false);
         }
     }
 
@@ -1037,63 +1028,8 @@ impl<'compile> Compiler<'compile> {
                 (Some(Self::literal), None, Precedence::None)
             }
             TokenType::Dot => (None, Some(Self::dot), Precedence::Call),
+            TokenType::This => (Some(Self::this), None, Precedence::None),
             _ => (None, None, Precedence::None),
-        }
-    }
-}
-
-struct Parser<'a> {
-    current: MaybeToken<'a>,
-    previous: MaybeToken<'a>,
-    line: usize,
-    panic_mode: bool,
-}
-
-impl<'a> Parser<'a> {
-    fn previous_type(&self) -> Option<TokenType> {
-        if let Some(Ok(token)) = &self.previous {
-            Some(token.r#type)
-        } else {
-            None
-        }
-    }
-
-    fn current_type(&self) -> Option<TokenType> {
-        if let Some(Ok(token)) = &self.current {
-            Some(token.r#type)
-        } else {
-            None
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, PartialOrd)]
-enum Precedence {
-    None = 0,
-    Assignment,
-    Or,
-    And,
-    Equality,
-    Comparison,
-    Term,
-    Factor,
-    Unary,
-    Call,
-    Primary,
-}
-
-impl<'a, 'b> Precedence {
-    fn next(self) -> Self {
-        match self {
-            Self::None => Self::Assignment,
-            Self::Assignment => Self::Or,
-            Self::Or => Self::And,
-            Self::Equality => Self::Comparison,
-            Self::Comparison => Self::Term,
-            Self::Term => Self::Factor,
-            Self::Factor => Self::Unary,
-            Self::Unary => Self::Call,
-            _ => Self::Primary,
         }
     }
 }

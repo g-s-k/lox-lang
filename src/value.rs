@@ -16,6 +16,11 @@ pub enum Value {
     Closure(Gc<Fun>, Box<[Gc<UpvalueRef>]>),
     Class(Gc<Class>),
     Instance(Gc<Instance>),
+    BoundMethod {
+        recv: Gc<Instance>,
+        fun: Gc<Fun>,
+        upvalues: Box<[Gc<UpvalueRef>]>,
+    },
     NativeFun(NativeFun),
 }
 
@@ -30,6 +35,7 @@ impl fmt::Display for Value {
             Self::Closure(fun, _) => write!(f, "{}", **fun),
             Self::Class(c) => write!(f, "{}", **c),
             Self::Instance(i) => write!(f, "{} instance", *i.class),
+            Self::BoundMethod { fun, .. } => write!(f, "{}", **fun),
             Self::NativeFun(_) => write!(f, "#<native fun>"),
         }
     }
@@ -46,6 +52,15 @@ impl fmt::Debug for Value {
             Self::Closure(fun, upvals) => write!(f, "Closure({}, {:#?})", **fun, upvals),
             Self::Class(c) => write!(f, "Class({})", **c),
             Self::Instance(i) => write!(f, "Instance({:?})", i),
+            Self::BoundMethod {
+                recv,
+                fun,
+                upvalues,
+            } => write!(
+                f,
+                "BoundMethod {{ {:?}#{} {:#?} }}",
+                **recv, **fun, upvalues
+            ),
             Self::NativeFun(ptr) => write!(f, "NativeFun({:p})", ptr),
         }
     }
@@ -102,6 +117,22 @@ impl Value {
                 i.mark();
                 grays.push(i.clone().into());
             }
+            Self::BoundMethod {
+                recv,
+                fun,
+                upvalues,
+            } => {
+                recv.mark();
+                grays.push(recv.clone().into());
+
+                fun.mark();
+                grays.push(fun.clone().into());
+
+                for u_val in upvalues.iter() {
+                    u_val.mark();
+                    grays.push(u_val.clone().into());
+                }
+            }
             _ => (),
         }
     }
@@ -132,13 +163,15 @@ impl Fun {
 
 #[derive(Clone, Debug)]
 pub struct Class {
-    name: Box<str>,
+    pub(crate) name: Box<str>,
+    pub(crate) methods: HashMap<Box<str>, Value>,
 }
 
 impl Class {
     pub(crate) fn new<T: ToString>(name: T) -> Self {
         Self {
             name: name.to_string().into_boxed_str(),
+            methods: HashMap::new(),
         }
     }
 }

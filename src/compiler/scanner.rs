@@ -72,7 +72,7 @@ impl<'a> Iterator for Scanner<'a> {
                 }
                 TokenType::r#String
             }
-            _ => return Some(Err((self.line, CompileErrorType::UnexpectedChar))),
+            _ => return Some(Err((self.line, CompileErrorType::UnexpectedChar(c)))),
         };
 
         let text = self.advance();
@@ -150,7 +150,7 @@ impl<'a> Scanner<'a> {
 
                     if in_comment {
                         self.next();
-                        break;
+                        in_comment = false;
                     }
                 }
                 '/' if self.peek_next('/') => in_comment = true,

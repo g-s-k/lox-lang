@@ -51,20 +51,28 @@ pub(crate) enum Op {
     JumpIfFalse(u16),
     Loop(u16),
     Call(u8),
+    Invoke(u8, u8),
+    InvokeLong(u16, u8),
     Closure(u8, Box<[Upvalue]>),
     ClosureLong(u16, Box<[Upvalue]>),
     CloseUpvalue,
     Return,
     Class(u8),
     ClassLong(u16),
+    Method(u8),
+    MethodLong(u16),
 }
 
 impl Op {
     pub fn disassemble<W: fmt::Write>(&self, chunk: &Chunk, f: &mut W) -> fmt::Result {
         macro_rules! fmt {
-            ($c:expr) => {
+            ($c: expr) => {
                 write!(f, "{:16} {}", self, $c)
             };
+            ($c1: expr, $c2: expr) => {{
+                fmt!($c1)?;
+                write!(f, " ({})", $c2)
+            }};
         }
 
         macro_rules! closure {
@@ -96,13 +104,17 @@ impl Op {
             Op::Closure(i, u_vals) => closure!(i, u_vals),
             Op::ClosureLong(i, u_vals) => closure!(i, u_vals),
 
+            Op::Invoke(i, c) => fmt!(chunk.constants[*i as usize], c),
+            Op::InvokeLong(i, c) => fmt!(chunk.constants[*i as usize], c),
+
             Op::Constant(i)
             | Op::GetGlobal(i)
             | Op::DefineGlobal(i)
             | Op::SetGlobal(i)
             | Op::Class(i)
             | Op::GetProperty(i)
-            | Op::SetProperty(i) => fmt!(chunk.constants[*i as usize]),
+            | Op::SetProperty(i)
+            | Op::Method(i) => fmt!(chunk.constants[*i as usize]),
 
             Op::ConstantLong(i)
             | Op::GetGlobalLong(i)
@@ -110,7 +122,8 @@ impl Op {
             | Op::SetGlobalLong(i)
             | Op::ClassLong(i)
             | Op::GetPropertyLong(i)
-            | Op::SetPropertyLong(i) => fmt!(chunk.constants[*i as usize]),
+            | Op::SetPropertyLong(i)
+            | Op::MethodLong(i) => fmt!(chunk.constants[*i as usize]),
 
             Op::GetLocalLong(c)
             | Op::SetLocalLong(c)
@@ -179,12 +192,16 @@ impl fmt::Display for Op {
                 Op::JumpIfFalse(_) => "JMP_FALSE",
                 Op::Loop(_) => "LOOP",
                 Op::Call(_) => "CALL",
+                Op::Invoke(_, _) => "INVOKE",
+                Op::InvokeLong(_, _) => "INVOKE_LONG",
                 Op::Closure(_, _) => "CLOSURE",
                 Op::ClosureLong(_, _) => "CLOSURE_LONG",
                 Op::CloseUpvalue => "CLOSE_UPVALUE",
                 Op::Return => "RETURN",
                 Op::Class(_) => "CLASS",
                 Op::ClassLong(_) => "CLASS_LONG",
+                Op::Method(_) => "METHOD",
+                Op::MethodLong(_) => "METHOD_LONG",
             },
             width = f.width().unwrap_or_default(),
         )

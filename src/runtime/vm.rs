@@ -80,7 +80,7 @@ impl<'writer, 'source> VM<'writer> {
         self.stack.push(fun);
         self.compiler_roots.clear();
 
-        let _ = self.call_value(0);
+        let _ = self.call_value_from_stack(0);
 
         self.run().map_err(|err| {
             let mut line_no = None;
@@ -219,7 +219,15 @@ impl<'writer, 'source> VM<'writer> {
                 Op::Jump(distance) => self.frame_mut().inst += distance as usize,
                 Op::Loop(distance) => self.frame_mut().inst -= distance as usize,
                 Op::Call(arg_count) => {
-                    self.call_value(arg_count)?;
+                    self.call_value_from_stack(arg_count)?;
+                }
+                Op::Invoke(index, arg_count) => {
+                    let name = self.read_string(index).to_string();
+                    self.invoke(name, arg_count)?;
+                }
+                Op::InvokeLong(index, arg_count) => {
+                    let name = self.read_string(index).to_string();
+                    self.invoke(name, arg_count)?;
                 }
                 Op::Closure(index, upvals) => self.create_closure(index, &upvals)?,
                 Op::ClosureLong(index, upvals) => self.create_closure(index, &upvals)?,
@@ -252,6 +260,8 @@ impl<'writer, 'source> VM<'writer> {
                     let val = Value::Class(self.alloc(Class::new(name)));
                     self.stack.push(val);
                 }
+                Op::Method(index) => self.define_method(index)?,
+                Op::MethodLong(index) => self.define_method(index)?,
             }
         }
 
@@ -503,6 +513,23 @@ impl<'writer, 'source> VM<'writer> {
                 if let Some(val) = i.fields.get(var_str) {
                     self.stack.push(val.clone());
                     Ok(())
+                } else if let Some(m) = i.class.methods.get(var_str) {
+                    let bound = match m {
+                        Value::Fun(f) => Value::BoundMethod {
+                            recv: i.clone(),
+                            fun: f.clone(),
+                            upvalues: Box::new([]),
+                        },
+                        Value::Closure(f, u) => Value::BoundMethod {
+                            recv: i.clone(),
+                            fun: f.clone(),
+                            upvalues: u.clone(),
+                        },
+                        _ => return Err(RuntimeError::ArgumentTypes),
+                    };
+
+                    self.stack.push(bound);
+                    Ok(())
                 } else {
                     Err(RuntimeError::UndefinedProperty(var_str.to_string()))
                 }
@@ -530,22 +557,91 @@ impl<'writer, 'source> VM<'writer> {
         }
     }
 
-    fn call_value(&mut self, arg_count: u8) -> Result<(), RuntimeError> {
-        match self.peek(arg_count.into())? {
-            Value::Closure(f, u) => {
-                let (f, u) = (f.clone(), u.clone());
-                self.call(f, u, arg_count)
-            }
-            Value::Fun(f) => {
-                let f = f.clone();
-                self.call(f, Box::new([]), arg_count)
-            }
+    fn define_method<T: Into<usize> + fmt::Display + Copy>(
+        &mut self,
+        index: T,
+    ) -> Result<(), RuntimeError> {
+        let value = self.stack.pop().ok_or(RuntimeError::StackEmpty)?;
+
+        match self.peek(0)? {
             Value::Class(c) => {
-                let c = c.clone();
-                self.pop_many(arg_count as u16 + 1)?;
-                let val = Value::Instance(self.alloc(Instance::new(c)));
-                self.stack.push(val);
+                let mut c = c.clone();
+                let var_str = self.read_string(index);
+                c.methods
+                    .insert(var_str.to_string().into_boxed_str(), value.clone());
                 Ok(())
+            }
+            _ => Err(RuntimeError::ArgumentTypes),
+        }
+    }
+
+    fn invoke<T: AsRef<str>>(&mut self, method: T, arg_count: u8) -> Result<(), RuntimeError> {
+        if let Value::Instance(recv) = self.peek(arg_count.into())? {
+            // check for fields, they shadow class methods
+            if let Some(field) = recv.fields.get(method.as_ref()).cloned() {
+                let l = self.stack.len();
+                self.stack[l - usize::from(arg_count) - 1] = field;
+                return self.call_value_from_stack(arg_count);
+            }
+
+            let class = recv.class.clone();
+            self.invoke_from_class(class, method.as_ref(), arg_count)
+        } else {
+            Err(RuntimeError::ArgumentTypes)
+        }
+    }
+
+    fn invoke_from_class(
+        &mut self,
+        class: Gc<Class>,
+        method: &str,
+        arg_count: u8,
+    ) -> Result<(), RuntimeError> {
+        if let Some(m) = class.methods.get(method) {
+            self.call_value(m.clone(), arg_count)
+        } else {
+            Err(RuntimeError::UndefinedProperty(method.to_string()))
+        }
+    }
+
+    fn call_value(&mut self, value: Value, arg_count: u8) -> Result<(), RuntimeError> {
+        match value {
+            Value::Closure(f, u) => self.call(f, u, arg_count),
+            Value::Fun(f) => self.call(f, Box::new([]), arg_count),
+            Value::Class(c) => {
+                let cls = c.clone();
+
+                let val = Value::Instance(self.alloc(Instance::new(cls)));
+                let l = self.stack.len();
+                self.stack[l - usize::from(arg_count) - 1] = val;
+
+                if let Some(init) = c.methods.get("init") {
+                    match init {
+                        Value::Fun(f) => {
+                            let f = f.clone();
+                            self.call(f, Box::new([]), arg_count)
+                        }
+                        Value::Closure(f, u) => {
+                            let (f, u) = (f.clone(), u.clone());
+                            self.call(f, u, arg_count)
+                        }
+                        _ => Err(RuntimeError::ArgumentTypes),
+                    }
+                } else if arg_count == 0 {
+                    Ok(())
+                } else {
+                    Err(RuntimeError::ArityMismatch(0, arg_count))
+                }
+            }
+            Value::BoundMethod {
+                recv,
+                fun,
+                upvalues,
+                ..
+            } => {
+                let l = self.stack.len();
+                self.stack[l - usize::from(arg_count) - 1] = Value::Instance(recv);
+                self.call(fun, upvalues, arg_count)
             }
             Value::NativeFun(f) => {
                 let from = self
@@ -563,6 +659,11 @@ impl<'writer, 'source> VM<'writer> {
             }
             _ => Err(RuntimeError::NotCallable),
         }
+    }
+
+    fn call_value_from_stack(&mut self, arg_count: u8) -> Result<(), RuntimeError> {
+        let val = self.peek(arg_count.into())?.clone();
+        self.call_value(val, arg_count)
     }
 
     fn call(
@@ -687,6 +788,10 @@ impl<'writer, 'source> VM<'writer> {
         } else if let Some(u) = obj.downcast_ref::<UpvalueRef>() {
             if let UpvalueRef::Captured(ref v) = *u {
                 v.mark(gray_stack);
+            }
+        } else if let Some(Class { methods, .. }) = obj.downcast_ref::<Class>() {
+            for method in methods.values() {
+                method.mark(gray_stack);
             }
         } else if let Some(Instance { class, fields }) = obj.downcast_ref::<Instance>() {
             class.mark();
