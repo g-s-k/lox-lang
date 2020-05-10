@@ -1,9 +1,11 @@
 [package]
 name = "lox-lang"
+description = "A Lox language runtime for Rust"
 version = "0.0.1"
 authors = ["George Kaplan <george@georgekaplan.xyz>"]
 edition = "2018"
 license = "MIT"
+repository = "https://github.com/g-s-k/lox-lang"
 keywords = ["interpreter", "lox", "compiler", "embeddable", "script"]
 categories = ["parser-implementations", "command-line-utilities"]
 default-run = "loxi"
@@ -23,7 +25,7 @@ trace-gc = []
 stress-test-gc = []
 
 [dependencies]
-clap = { git = "https://github.com/clap-rs/clap/" }
+clap = "3.0.0-beta.1"
 log = "0.4.8"
 simplelog = "0.7.6"
 lazy_static = "1.4.0"
