@@ -975,7 +975,7 @@ impl<'compile> Compiler<'compile> {
             _ => loop {
                 self.expression();
 
-                if arg_count == u8::MAX {
+                if arg_count == std::u8::MAX {
                     self.error(CompileErrorType::TooManyParams);
                 } else {
                     arg_count += 1;
