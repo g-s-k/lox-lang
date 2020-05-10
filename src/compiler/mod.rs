@@ -94,7 +94,7 @@ macro_rules! emit {
     }};
 
     (jump $c: ident : $variant: ident) => {{
-        $c.fun.inner.chunk.write(Op::$variant(u16::MAX), $c.parser.line)
+        $c.fun.inner.chunk.write(Op::$variant(std::u16::MAX), $c.parser.line)
     }};
 
     (loop $c: ident : $loop_start: expr) => {{
@@ -104,7 +104,7 @@ macro_rules! emit {
         let difference = match difference.try_into() {
             Err(_) => {
                 $c.error(CompileErrorType::JumpTooLarge(difference));
-                u16::MAX
+                std::u16::MAX
             }
             Ok(d) => d,
         };
@@ -416,7 +416,7 @@ impl<'compile> Compiler<'compile> {
         match self.parser.current_type() {
             Some(TokenType::RightParen) => (), // empty list
             _ => loop {
-                if self.fun.inner.arity == u8::MAX {
+                if self.fun.inner.arity == std::u8::MAX {
                     self.error_at_current(CompileErrorType::TooManyParams);
                 } else {
                     self.fun.inner.arity += 1;

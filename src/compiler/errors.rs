@@ -84,7 +84,7 @@ impl fmt::Display for CompileErrorType {
                 f,
                 "jump distance {:x} is too large to fit in a `u16` (max value {:x})",
                 distance,
-                u16::MAX
+                std::u16::MAX
             ),
             TopLevelReturn => write!(f, "return statement outside a function body"),
             ExpectedEOF => write!(f, "expected end of input"),
