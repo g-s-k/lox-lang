@@ -300,7 +300,31 @@ impl<'compile> Compiler<'compile> {
         self.class = Some(Box::new(ClassWrapper {
             enclosing: self.class.take(),
             name: class_name.to_string().into_boxed_str(),
+            has_superclass: false,
         }));
+
+        if let Some(TokenType::Less) = self.parser.current_type() {
+            self.advance();
+            self.consume(TokenType::Identifier, CompileErrorType::MissingSuperclass);
+            self.variable(false);
+
+            if let Some(Ok(Token { text, .. })) = self.parser.previous {
+                if text == class_name {
+                    self.error(CompileErrorType::InheritFromSelf);
+                }
+            }
+
+            self.begin_scope();
+            self.add_local("super");
+            self.define_variable(0);
+
+            self.named_variable(class_name, false);
+            emit!(self, Op::Inherit);
+
+            if let Some(ref mut c) = &mut self.class {
+                c.has_superclass = true;
+            }
+        }
 
         self.named_variable(class_name, false); // load class object back onto stack
 
@@ -327,12 +351,26 @@ impl<'compile> Compiler<'compile> {
         emit!(self, Op::Pop);
 
         if let Some(cls) = self.class.take() {
+            if cls.has_superclass {
+                self.end_scope();
+            }
+
             self.class = cls.enclosing;
+        } else {
+            unreachable!("Must be compiling a class at this point.")
         }
     }
 
     fn method(&mut self) {
-        let name_idx = self.parse_variable(CompileErrorType::MissingMethodName);
+        self.consume(TokenType::Identifier, CompileErrorType::MissingMethodName);
+        let name_idx = if let Some(Ok(Token { text, .. })) = self.parser.previous {
+            self.fun
+                .inner
+                .chunk
+                .add_constant(Value::r#String(text.to_string().into_boxed_str()))
+        } else {
+            unreachable!()
+        };
 
         self.function(
             if let Some(Ok(Token { text: "init", .. })) = self.parser.previous {
@@ -536,8 +574,9 @@ impl<'compile> Compiler<'compile> {
     fn end_scope(&mut self) {
         self.fun.scope_depth -= 1;
 
-        for local in self.fun.locals.iter().rev() {
-            if local.depth < self.fun.scope_depth {
+        while let Some(local) = self.fun.locals.pop() {
+            if local.depth <= self.fun.scope_depth {
+                self.fun.locals.push(local);
                 break;
             }
 
@@ -1005,6 +1044,48 @@ impl<'compile> Compiler<'compile> {
         }
     }
 
+    fn super_call(&mut self, _: bool) {
+        if let Some(cls) = &self.class {
+            if !cls.has_superclass {
+                self.error(CompileErrorType::InvalidSuper(
+                    "in a class with no superclass",
+                ));
+            }
+        } else {
+            self.error(CompileErrorType::InvalidSuper("outside of a class"));
+        }
+
+        self.consume(
+            TokenType::Dot,
+            CompileErrorType::MissingDot("after 'super'"),
+        );
+
+        self.consume(TokenType::Identifier, CompileErrorType::MissingMethodName);
+        let property_idx = if let Some(Ok(Token { text, .. })) = self.parser.previous {
+            self.fun
+                .inner
+                .chunk
+                .add_constant(Value::r#String(text.to_string().into_boxed_str()))
+        } else {
+            unreachable!()
+        };
+
+        self.named_variable("this", false);
+
+        if let Some(TokenType::LeftParen) = self.parser.current_type() {
+            self.advance();
+            let arg_count = self.argument_list();
+            self.named_variable("super", false);
+            emit!(
+                self,
+                short_or_long!(property_idx; SuperInvoke <> SuperInvokeLong, arg_count)
+            );
+        } else {
+            self.named_variable("super", false);
+            emit!(self, short_or_long!(property_idx; GetSuper <> GetSuperLong));
+        }
+    }
+
     fn get_rule(sigil: TokenType) -> Rule<'compile> {
         match sigil {
             TokenType::LeftParen => (Some(Self::grouping), Some(Self::call), Precedence::Call),
@@ -1029,6 +1110,7 @@ impl<'compile> Compiler<'compile> {
             }
             TokenType::Dot => (None, Some(Self::dot), Precedence::Call),
             TokenType::This => (Some(Self::this), None, Precedence::None),
+            TokenType::Super => (Some(Self::super_call), None, Precedence::None),
             _ => (None, None, Precedence::None),
         }
     }

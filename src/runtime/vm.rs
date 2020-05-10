@@ -174,6 +174,8 @@ impl<'writer, 'source> VM<'writer> {
                 Op::GetPropertyLong(index) => self.get_property(index)?,
                 Op::SetProperty(index) => self.set_property(index)?,
                 Op::SetPropertyLong(index) => self.set_property(index)?,
+                Op::GetSuper(index) => self.get_super(index)?,
+                Op::GetSuperLong(index) => self.get_super(index)?,
                 Op::Equal => {
                     let (a, b) = self.pop_pair()?;
                     self.stack.push(Value::Boolean(b == a));
@@ -229,10 +231,35 @@ impl<'writer, 'source> VM<'writer> {
                     let name = self.read_string(index).to_string();
                     self.invoke(name, arg_count)?;
                 }
+                Op::SuperInvoke(index, arg_count) => {
+                    let name = self.read_string(index).to_string();
+                    if let Value::Class(super_class) =
+                        self.stack.pop().ok_or(RuntimeError::StackEmpty)?
+                    {
+                        self.invoke_from_class(super_class, &name, arg_count)?;
+                    } else {
+                        return Err(RuntimeError::ArgumentTypes);
+                    }
+                }
+                Op::SuperInvokeLong(index, arg_count) => {
+                    let name = self.read_string(index).to_string();
+                    if let Value::Class(super_class) =
+                        self.stack.pop().ok_or(RuntimeError::StackEmpty)?
+                    {
+                        self.invoke_from_class(super_class, &name, arg_count)?;
+                    } else {
+                        return Err(RuntimeError::ArgumentTypes);
+                    }
+                }
                 Op::Closure(index, upvals) => self.create_closure(index, &upvals)?,
                 Op::ClosureLong(index, upvals) => self.create_closure(index, &upvals)?,
                 Op::CloseUpvalue => {
-                    self.close_upvalues(self.stack.len() - 1);
+                    let idx = self
+                        .stack
+                        .len()
+                        .checked_sub(1)
+                        .ok_or(RuntimeError::StackEmpty)?;
+                    self.close_upvalues(idx);
                     self.stack.pop();
                 }
                 Op::Return => {
@@ -259,6 +286,18 @@ impl<'writer, 'source> VM<'writer> {
                     let name = self.read_constant(index).clone();
                     let val = Value::Class(self.alloc(Class::new(name)));
                     self.stack.push(val);
+                }
+                Op::Inherit => {
+                    if let (Value::Class(mut sub_class), Value::Class(super_class)) = (
+                        self.stack.pop().ok_or(RuntimeError::StackEmpty)?,
+                        self.peek(0)?.clone(),
+                    ) {
+                        for (name, value) in &super_class.methods {
+                            sub_class.methods.insert(name.clone(), value.clone());
+                        }
+                    } else {
+                        return Err(RuntimeError::ArgumentTypes);
+                    }
                 }
                 Op::Method(index) => self.define_method(index)?,
                 Op::MethodLong(index) => self.define_method(index)?,
@@ -510,31 +549,41 @@ impl<'writer, 'source> VM<'writer> {
             None => Err(RuntimeError::StackEmpty),
             Some(Value::Instance(i)) => {
                 let var_str = self.read_string(index);
+
                 if let Some(val) = i.fields.get(var_str) {
                     self.stack.push(val.clone());
                     Ok(())
-                } else if let Some(m) = i.class.methods.get(var_str) {
-                    let bound = match m {
-                        Value::Fun(f) => Value::BoundMethod {
-                            recv: i.clone(),
-                            fun: f.clone(),
-                            upvalues: Box::new([]),
-                        },
-                        Value::Closure(f, u) => Value::BoundMethod {
-                            recv: i.clone(),
-                            fun: f.clone(),
-                            upvalues: u.clone(),
-                        },
-                        _ => return Err(RuntimeError::ArgumentTypes),
-                    };
-
-                    self.stack.push(bound);
-                    Ok(())
                 } else {
-                    Err(RuntimeError::UndefinedProperty(var_str.to_string()))
+                    let var_string = var_str.to_string();
+                    self.bind_method(i.class.clone(), i, var_string)
                 }
             }
             Some(_) => Err(RuntimeError::ArgumentTypes),
+        }
+    }
+
+    fn bind_method<T: AsRef<str>>(
+        &mut self,
+        class: Gc<Class>,
+        instance: Gc<Instance>,
+        name: T,
+    ) -> Result<(), RuntimeError> {
+        if let Some(m) = class.methods.get(name.as_ref()) {
+            let (fun, upvalues) = match m {
+                Value::Fun(f) => (f.clone(), Box::new([]) as Box<[_]>),
+                Value::Closure(f, u) => (f.clone(), u.clone()),
+                _ => return Err(RuntimeError::ArgumentTypes),
+            };
+
+            self.stack.push(Value::BoundMethod {
+                recv: instance,
+                fun,
+                upvalues,
+            });
+
+            Ok(())
+        } else {
+            Err(RuntimeError::UndefinedProperty(name.as_ref().to_string()))
         }
     }
 
@@ -554,6 +603,20 @@ impl<'writer, 'source> VM<'writer> {
                 Ok(())
             }
             _ => Err(RuntimeError::ArgumentTypes),
+        }
+    }
+
+    fn get_super<T: Into<usize> + fmt::Display + Copy>(
+        &mut self,
+        index: T,
+    ) -> Result<(), RuntimeError> {
+        let (this_val, super_val) = self.pop_pair()?;
+
+        if let (Value::Class(super_class), Value::Instance(this)) = (super_val, this_val) {
+            let method_name = self.read_string(index).to_string();
+            self.bind_method(super_class, this, method_name)
+        } else {
+            Err(RuntimeError::ArgumentTypes)
         }
     }
 
@@ -581,11 +644,11 @@ impl<'writer, 'source> VM<'writer> {
             if let Some(field) = recv.fields.get(method.as_ref()).cloned() {
                 let l = self.stack.len();
                 self.stack[l - usize::from(arg_count) - 1] = field;
-                return self.call_value_from_stack(arg_count);
+                self.call_value_from_stack(arg_count)
+            } else {
+                let class = recv.class.clone();
+                self.invoke_from_class(class, method.as_ref(), arg_count)
             }
-
-            let class = recv.class.clone();
-            self.invoke_from_class(class, method.as_ref(), arg_count)
         } else {
             Err(RuntimeError::ArgumentTypes)
         }

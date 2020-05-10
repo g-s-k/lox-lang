@@ -8,6 +8,7 @@ pub(super) enum FunType {
     Initializer,
 }
 
+#[derive(Debug)]
 pub(super) struct Local<'compile> {
     pub(super) name: &'compile str,
     pub(super) depth: usize,
@@ -95,7 +96,9 @@ impl<'compile> FunWrapper<'compile> {
     }
 }
 
+#[derive(Debug)]
 pub(super) struct ClassWrapper {
     pub(super) enclosing: Option<Box<Self>>,
     pub(super) name: Box<str>,
+    pub(super) has_superclass: bool,
 }

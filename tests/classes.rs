@@ -2,7 +2,6 @@ mod utils;
 
 #[test]
 fn object() -> utils::Result {
-    // utils::setup_logger();
     run!(
         r#"
 class Brioche {}
@@ -14,7 +13,6 @@ print Brioche;
 
 #[test]
 fn instance() -> utils::Result {
-    // utils::setup_logger();
     run!(
         r#"
 class Brioche {}
@@ -27,7 +25,6 @@ print Brioche();
 #[test]
 #[should_panic]
 fn bad_getter() {
-    // utils::setup_logger();
     let mut vm = lox_lang::VM::default();
     vm.interpret(
         r#"
@@ -40,7 +37,6 @@ print obj.field;
 
 #[test]
 fn setter() -> utils::Result {
-    // utils::setup_logger();
     run!(
         r#"
 class Toast {}
@@ -53,7 +49,6 @@ print toast.jam = "grape";
 
 #[test]
 fn properties() -> utils::Result {
-    // utils::setup_logger();
     run!(
         r#"
 class Pair {}
@@ -69,7 +64,6 @@ print pair.first + pair.second;
 
 #[test]
 fn define_methods() -> utils::Result {
-    // utils::setup_logger();
     run!(
         r#"
 class Brunch {
@@ -82,7 +76,6 @@ class Brunch {
 
 #[test]
 fn no_this() -> utils::Result {
-    // utils::setup_logger();
     run!(
         r#"
 class Scone {
@@ -100,7 +93,6 @@ scone.topping("berries", "cream");
 
 #[test]
 fn this() -> utils::Result {
-    // utils::setup_logger();
     run!(
         r#"
 class Nested {
@@ -121,7 +113,6 @@ Nested().method();
 
 #[test]
 fn say_name() -> utils::Result {
-    // utils::setup_logger();
     run!(
         r#"
 class Person {
@@ -142,7 +133,6 @@ method();
 
 #[test]
 fn init() -> utils::Result {
-    // utils::setup_logger();
     run!(
         r#"
 class CoffeeMaker {
@@ -167,7 +157,6 @@ maker.brew();
 
 #[test]
 fn invoke_field() -> utils::Result {
-    // utils::setup_logger();
     run!(
         r#"
 class Oops {
@@ -184,5 +173,103 @@ var oops = Oops();
 oops.field();
 "# ->
         "not a method"
+    )
+}
+
+#[test]
+fn inherit() -> utils::Result {
+    run!(
+        r#"
+class Doughnut {
+  cook() {
+    print "Dunk in the fryer.";
+  }
+}
+
+class Cruller < Doughnut {
+  finish() {
+    print "Glaze with icing";
+  }
+}
+"# ->
+    )
+}
+
+#[test]
+fn super_call() -> utils::Result {
+    run!(
+        r#"
+class A {
+  method() {
+    print "A method";
+  }
+}
+
+class B < A {
+  method() {
+    print "B method";
+  }
+
+  test() {
+    super.method();
+  }
+}
+
+class C < B {}
+
+C().test();
+"# ->
+        "A method"
+    )
+}
+
+#[test]
+fn super_access() -> utils::Result {
+    run!(
+        r#"
+class A {
+  method() {
+    print "A";
+  }
+}
+
+class B < A {
+  method() {
+    var closure = super.method;
+    closure(); // Prints "A".
+  }
+}
+
+B().method();
+"# ->
+        "A"
+    )
+}
+
+#[test]
+fn super_doughnut() -> utils::Result {
+    run!(
+        r#"
+class Doughnut {
+  cook() {
+    print "Dunk in the fryer.";
+    this.finish();
+  }
+
+  finish(ingredient) {
+    print "Finish with " + ingredient;
+  }
+}
+
+class Cruller < Doughnut {
+  finish() {
+    super.finish("icing");
+  }
+}
+
+Cruller().cook();
+"# ->
+        "Dunk in the fryer.",
+        "Finish with icing"
     )
 }

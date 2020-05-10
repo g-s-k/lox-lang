@@ -33,6 +33,8 @@ pub(crate) enum Op {
     GetPropertyLong(u16),
     SetProperty(u8),
     SetPropertyLong(u16),
+    GetSuper(u8),
+    GetSuperLong(u16),
 
     // operators
     Equal,
@@ -53,12 +55,15 @@ pub(crate) enum Op {
     Call(u8),
     Invoke(u8, u8),
     InvokeLong(u16, u8),
+    SuperInvoke(u8, u8),
+    SuperInvokeLong(u16, u8),
     Closure(u8, Box<[Upvalue]>),
     ClosureLong(u16, Box<[Upvalue]>),
     CloseUpvalue,
     Return,
     Class(u8),
     ClassLong(u16),
+    Inherit,
     Method(u8),
     MethodLong(u16),
 }
@@ -104,8 +109,10 @@ impl Op {
             Op::Closure(i, u_vals) => closure!(i, u_vals),
             Op::ClosureLong(i, u_vals) => closure!(i, u_vals),
 
-            Op::Invoke(i, c) => fmt!(chunk.constants[*i as usize], c),
-            Op::InvokeLong(i, c) => fmt!(chunk.constants[*i as usize], c),
+            Op::Invoke(i, c) | Op::SuperInvoke(i, c) => fmt!(chunk.constants[*i as usize], c),
+            Op::InvokeLong(i, c) | Op::SuperInvokeLong(i, c) => {
+                fmt!(chunk.constants[*i as usize], c)
+            }
 
             Op::Constant(i)
             | Op::GetGlobal(i)
@@ -114,6 +121,7 @@ impl Op {
             | Op::Class(i)
             | Op::GetProperty(i)
             | Op::SetProperty(i)
+            | Op::GetSuper(i)
             | Op::Method(i) => fmt!(chunk.constants[*i as usize]),
 
             Op::ConstantLong(i)
@@ -123,6 +131,7 @@ impl Op {
             | Op::ClassLong(i)
             | Op::GetPropertyLong(i)
             | Op::SetPropertyLong(i)
+            | Op::GetSuperLong(i)
             | Op::MethodLong(i) => fmt!(chunk.constants[*i as usize]),
 
             Op::GetLocalLong(c)
@@ -176,6 +185,8 @@ impl fmt::Display for Op {
                 Op::GetPropertyLong(_) => "GET_PROPERTY_LONG",
                 Op::SetProperty(_) => "SET_PROPERTY",
                 Op::SetPropertyLong(_) => "SET_PROPERTY_LONG",
+                Op::GetSuper(_) => "GET_SUPER",
+                Op::GetSuperLong(_) => "GET_SUPER_LONG",
 
                 Op::Equal => "EQUAL",
                 Op::Greater => "GREATER",
@@ -194,12 +205,15 @@ impl fmt::Display for Op {
                 Op::Call(_) => "CALL",
                 Op::Invoke(_, _) => "INVOKE",
                 Op::InvokeLong(_, _) => "INVOKE_LONG",
+                Op::SuperInvoke(_, _) => "SUPER_INVOKE",
+                Op::SuperInvokeLong(_, _) => "SUPER_INVOKE_LONG",
                 Op::Closure(_, _) => "CLOSURE",
                 Op::ClosureLong(_, _) => "CLOSURE_LONG",
                 Op::CloseUpvalue => "CLOSE_UPVALUE",
                 Op::Return => "RETURN",
                 Op::Class(_) => "CLASS",
                 Op::ClassLong(_) => "CLASS_LONG",
+                Op::Inherit => "INHERIT",
                 Op::Method(_) => "METHOD",
                 Op::MethodLong(_) => "METHOD_LONG",
             },
