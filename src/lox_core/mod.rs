@@ -16,6 +16,7 @@ pub enum Value {
     Boolean(bool),
     Number(f64),
     r#String(Box<str>),
+    NativeFun(Gc<NativeFun>),
 
     #[doc(hidden)]
     Fun(Gc<Fun>),
@@ -27,9 +28,6 @@ pub enum Value {
         fun: Gc<Fun>,
         upvalues: Box<[Gc<UpvalueRef>]>,
     },
-
-    NativeFun(NativeFun),
-
     #[doc(hidden)]
     Class(Gc<Class>),
     #[doc(hidden)]
@@ -169,6 +167,10 @@ impl Value {
                     grays.push(u_val.as_any());
                 }
             }
+            Self::NativeFun(nf) => {
+                nf.mark();
+                grays.push(nf.as_any());
+            }
             _ => (),
         }
     }
@@ -304,17 +306,17 @@ impl Instance {
 /// #     }
 /// # }
 /// # impl Error for MyError {}
+/// # let mut vm = VM::default();
+/// # vm.buffer_output(true);
 /// /// This function wraps `str::replace` for use in Lox
-/// fn replace(args: &[Value]) -> Result<Value, Box<dyn Error>> {
+/// let replace = vm.alloc(Box::new(|args: &[Value]| {
 ///     match args {
 ///         [Value::r#String(text), Value::r#String(pat), Value::r#String(rep)] =>
-///             Ok(text.replace(pat.as_ref(), rep).into()),
-///         _ => Err(Box::new(MyError)),
+///             Ok(text.replace(pat.as_ref(), rep.as_ref()).into()),
+///         _ => Err(Box::new(MyError) as Box<dyn Error>),
 ///     }
-/// }
+/// }) as lox_lang::NativeFun);
 ///
-/// let mut vm = VM::default();
-/// vm.buffer_output(true);
 /// vm.define_global("replace", Value::NativeFun(replace));
 ///
 /// vm.interpret(r#"
@@ -322,8 +324,8 @@ impl Instance {
 ///     print replace(proverb, "new", "old");
 /// "#);
 ///
-/// let mut output = String::new();
-/// vm.read_to_string(&mut output).unwrap();
+/// # let mut output = String::new();
+/// # vm.read_to_string(&mut output).unwrap();
 /// assert_eq!(output, "what is old becomes old again\n");
 /// ```
-pub type NativeFun = fn(args: &[Value]) -> Result<Value, Box<dyn error::Error>>;
+pub type NativeFun = Box<dyn FnMut(&[Value]) -> Result<Value, Box<dyn error::Error>>>;

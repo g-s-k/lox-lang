@@ -39,27 +39,25 @@ impl<T: ?Sized> Gc<T> {
             unsafe { &*self.0 }
         }
     }
-}
 
-impl<T: ?Sized + fmt::Debug> Gc<T> {
     pub(crate) fn is_marked(&self) -> bool {
         self.deref_non_null().mark.get()
-    }
-
-    pub(crate) fn mark(&self) {
-        #[cfg(feature = "trace-gc")]
-        log::debug!("{:p} mark {:?}", self.0, self.deref());
-
-        self.deref_non_null().mark.set(true);
     }
 
     pub(crate) fn clear_mark(&self) {
         self.deref_non_null().mark.set(false);
     }
 
+    pub(crate) fn mark(&self) {
+        #[cfg(feature = "trace-gc")]
+        log::debug!("{:p} mark", self.0);
+
+        self.deref_non_null().mark.set(true);
+    }
+
     pub(crate) fn free(self) {
         #[cfg(feature = "trace-gc")]
-        log::debug!("{:p} free {:?}", self.0, self.deref());
+        log::debug!("{:p} free", self.0);
 
         unsafe {
             // drop inner wrapper, and thus the value it owns

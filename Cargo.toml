@@ -1,7 +1,8 @@
 [package]
 name = "lox-lang"
 description = "A Lox language runtime for Rust"
-version = "0.0.1"
+readme = "./README.md"
+version = "0.0.2"
 authors = ["George Kaplan <george@georgekaplan.xyz>"]
 edition = "2018"
 license = "MIT"
@@ -28,7 +29,6 @@ stress-test-gc = []
 clap = "3.0.0-beta.1"
 log = "0.4.8"
 simplelog = "0.7.6"
-lazy_static = "1.4.0"
 jemallocator = "0.3.2"
 
 [profile.release]

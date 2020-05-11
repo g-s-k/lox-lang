@@ -584,14 +584,14 @@ impl super::VM {
                 self.stack[l - usize::from(arg_count) - 1] = Value::Instance(recv);
                 self.call(fun, upvalues, arg_count)
             }
-            Value::NativeFun(f) => {
+            Value::NativeFun(mut f) => {
                 let from = self
                     .stack
                     .len()
                     .checked_sub(arg_count.into())
                     .ok_or(RuntimeError::StackEmpty)?;
 
-                let result = f(&self.stack[from..]);
+                let result = (f.as_mut())(&self.stack[from..]);
                 self.pop_many(u16::from(arg_count) + 1)?;
                 self.stack
                     .push(result.map_err(RuntimeError::NativeFunError)?);

@@ -85,7 +85,15 @@ impl super::VM {
         cfg!(feature = "stress-test-gc") || self.total_allocations > self.next_gc
     }
 
-    pub(crate) fn alloc<T: Any>(&mut self, obj: T) -> Gc<T> {
+    /// Allocate a garbage-collected value on the heap.
+    ///
+    /// This method is how to obtain a `Gc` pointer (not exported from this crate and has no public
+    /// constructor). Values allocated with this method will be owned (and eventually freed) by the
+    /// VM. If the value lives until the VM goes out of scope, it will be freed in the VM's `Drop`
+    /// implementation.
+    ///
+    /// For a usage example, see [`NativeFun`](./type.NativeFun.html).
+    pub fn alloc<T: Any>(&mut self, obj: T) -> Gc<T> {
         if self.should_collect() {
             self.collect_garbage();
         }

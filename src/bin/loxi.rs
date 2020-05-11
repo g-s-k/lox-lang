@@ -1,5 +1,5 @@
 use std::{
-    error, fs,
+    fs,
     io::{self, BufRead, Write},
     path::{Path, PathBuf},
     process,
@@ -11,7 +11,6 @@ static GLOBAL: jemallocator::Jemalloc = jemallocator::Jemalloc;
 
 use {
     clap::Clap,
-    lazy_static::{initialize, lazy_static},
     lox_lang::{Error, ErrorCategory, Value, VM},
     simplelog::{ConfigBuilder, LevelFilter, SimpleLogger},
 };
@@ -86,15 +85,11 @@ fn run_file(path: &Path) -> Result<(), Error> {
 
 fn vm_with_global() -> VM {
     let mut vm = VM::default();
-    initialize(&START_TIME);
-    vm.define_global("clock", Value::NativeFun(clock_native));
+
+    let start_time = Instant::now();
+    let clock_cls = move |_: &[Value]| Ok(start_time.elapsed().as_secs_f64().into());
+    let clock_fun = vm.alloc(Box::new(clock_cls) as lox_lang::NativeFun);
+    vm.define_global("clock", Value::NativeFun(clock_fun));
+
     vm
-}
-
-lazy_static! {
-    static ref START_TIME: Instant = Instant::now();
-}
-
-fn clock_native(_: &[Value]) -> Result<Value, Box<dyn error::Error>> {
-    Ok(Value::Number(START_TIME.elapsed().as_secs_f64()))
 }
