@@ -84,7 +84,7 @@ fn run_file(path: &Path) -> Result<(), Error> {
         .map_err(|mut errs| errs.pop().unwrap())
 }
 
-fn vm_with_global() -> VM<'static> {
+fn vm_with_global() -> VM {
     let mut vm = VM::default();
     initialize(&START_TIME);
     vm.define_global("clock", Value::NativeFun(clock_native));

@@ -1,102 +1,14 @@
-use std::{any::Any, collections::HashMap, fmt, io::Write, mem};
+use std::fmt;
 
 use {
-    super::{CallFrame, RuntimeError, UpvalueRef},
-    crate::{Class, Compiler, Error, Fun, Gc, Instance, List, Op, Upvalue, Value},
+    super::frame::CallFrame,
+    crate::{Class, Fun, Gc, Instance, Op, RuntimeError, Upvalue, UpvalueRef, Value},
 };
 
-/// The Lox virtual machine.
-///
-/// ### Example
-///
-/// ```
-/// # use lox_lang::VM;
-/// let mut vm = VM::default();
-/// vm.interpret("3 + 3 == 6"); // true
-/// ```
-pub struct VM<'writer> {
-    stdout: Option<&'writer mut dyn Write>,
+type RunResult = Result<(), RuntimeError>;
 
-    stack: Vec<Value>,
-    frames: Vec<CallFrame>,
-    globals: HashMap<Box<str>, Value>,
-    open_upvalues: List<Gc<UpvalueRef>>,
-
-    objects: List<Gc<dyn Any>>,
-    compiler_roots: Vec<Value>,
-    total_allocations: usize,
-    next_gc: usize,
-}
-
-impl Default for VM<'_> {
-    /// The `VM` constructor.
-    ///
-    /// Program output defaults to [`Stdout`]. To customize
-    /// this behavior, see the [`replace_stream`] method.
-    ///
-    /// [`replace_stream`]: #method.replace_stream
-    /// [`Stdout`]: https://doc.rust-lang.org/std/io/struct.Stdout.html
-    fn default() -> Self {
-        VM {
-            stdout: None,
-            stack: Vec::with_capacity(256),
-            frames: Vec::with_capacity(256),
-            globals: HashMap::new(),
-            open_upvalues: List::new(),
-            objects: List::new(),
-            compiler_roots: Vec::new(),
-            total_allocations: 0,
-            next_gc: 1 << 20,
-        }
-    }
-}
-
-impl<'writer, 'source> VM<'writer> {
-    /// Compile and run Lox code from a source string.
-    ///
-    /// ### Errors
-    ///
-    /// Errors are returned in a `Vec`. This is because compilation (not runtime) is able to
-    /// continue after error(s) are encountered.
-    pub fn interpret<T: AsRef<str> + 'source>(&mut self, source: T) -> Result<(), Vec<Error>> {
-        self.compiler_roots.clear();
-
-        let fun = Compiler::compile(source.as_ref(), &mut |f| {
-            let val = Value::Fun(self.alloc(f));
-            self.compiler_roots.push(val.clone());
-            val
-        })
-        .map_err(|errs| errs.into_iter().map(Into::into).collect::<Vec<_>>())?;
-
-        let fun = Value::Fun(self.alloc(fun));
-
-        self.stack.push(fun);
-        self.compiler_roots.clear();
-
-        let _ = self.call_value_from_stack(0);
-
-        self.run().map_err(|err| {
-            let mut line_no = None;
-            let mut backtrace = format!("{}", err);
-
-            for frame in self.frames.iter().rev() {
-                let function = &(*frame.func).name;
-                let (line, _) = frame.chunk().find_line(frame.inst);
-
-                if line_no.is_none() {
-                    line_no = Some(line);
-                }
-
-                backtrace += &format!("\n=>> line {} in `{}`", line, function);
-            }
-
-            log::error!("{}", backtrace);
-
-            vec![Error::from_runtime_error(err, line_no)]
-        })
-    }
-
-    fn run(&mut self) -> Result<(), RuntimeError> {
+impl super::VM {
+    pub(super) fn run(&mut self) -> RunResult {
         macro_rules! binary_op_body {
             ($op: tt, $variant: ident) => {
                 if let (Value::Number(a), Value::Number(b)) = self.pop_pair()? {
@@ -271,13 +183,13 @@ impl<'writer, 'source> VM<'writer> {
                     self.stack.push(result);
                 }
                 Op::Class(index) => {
-                    let name = self.read_constant(index).clone();
-                    let val = Value::Class(self.alloc(Class::new(name)));
+                    let name = Class::new(self.read_constant(index));
+                    let val = Value::Class(self.alloc(name));
                     self.stack.push(val);
                 }
                 Op::ClassLong(index) => {
-                    let name = self.read_constant(index).clone();
-                    let val = Value::Class(self.alloc(Class::new(name)));
+                    let name = Class::new(self.read_constant(index));
+                    let val = Value::Class(self.alloc(name));
                     self.stack.push(val);
                 }
                 Op::Inherit => {
@@ -339,7 +251,7 @@ impl<'writer, 'source> VM<'writer> {
     fn define_global_from_stack<T: Into<usize> + fmt::Display + Copy>(
         &mut self,
         index: T,
-    ) -> Result<(), RuntimeError> {
+    ) -> RunResult {
         if let Some(value) = self.stack.pop() {
             let var_name = self.read_string(index).to_string().into_boxed_str();
             self.globals.insert(var_name, value);
@@ -349,10 +261,7 @@ impl<'writer, 'source> VM<'writer> {
         }
     }
 
-    fn fetch_global<T: Into<usize> + fmt::Display + Copy>(
-        &mut self,
-        index: T,
-    ) -> Result<(), RuntimeError> {
+    fn fetch_global<T: Into<usize> + fmt::Display + Copy>(&mut self, index: T) -> RunResult {
         let var_name = self.read_string(index);
         if let Some(value) = self.globals.get(var_name).cloned() {
             self.stack.push(value);
@@ -362,10 +271,7 @@ impl<'writer, 'source> VM<'writer> {
         }
     }
 
-    fn set_global<T: Into<usize> + fmt::Display + Copy>(
-        &mut self,
-        index: T,
-    ) -> Result<(), RuntimeError> {
+    fn set_global<T: Into<usize> + fmt::Display + Copy>(&mut self, index: T) -> RunResult {
         let var_str = self.read_string(index).to_string();
         if self.globals.contains_key(&*var_str) {
             let value = self.peek(0)?.clone();
@@ -376,7 +282,7 @@ impl<'writer, 'source> VM<'writer> {
         }
     }
 
-    fn fetch_local<T: Into<usize>>(&mut self, index: T) -> Result<(), RuntimeError> {
+    fn fetch_local<T: Into<usize>>(&mut self, index: T) -> RunResult {
         let base_ptr = self.frame().base;
 
         let index = index.into();
@@ -388,7 +294,7 @@ impl<'writer, 'source> VM<'writer> {
         }
     }
 
-    fn set_local<T: Into<usize>>(&mut self, index: T) -> Result<(), RuntimeError> {
+    fn set_local<T: Into<usize>>(&mut self, index: T) -> RunResult {
         let base_ptr = self.frame().base;
         let new_val = self.peek(0)?.clone();
 
@@ -409,7 +315,7 @@ impl<'writer, 'source> VM<'writer> {
         Err(RuntimeError::StackEmpty)
     }
 
-    fn pop_many(&mut self, count: u16) -> Result<(), RuntimeError> {
+    fn pop_many(&mut self, count: u16) -> RunResult {
         if let Some(new_len) = self.stack.len().checked_sub(count as usize) {
             self.stack.truncate(new_len);
             Ok(())
@@ -430,18 +336,14 @@ impl<'writer, 'source> VM<'writer> {
         }
     }
 
-    fn create_closure<T: Into<usize>>(
-        &mut self,
-        index: T,
-        upvals: &[Upvalue],
-    ) -> Result<(), RuntimeError> {
+    fn create_closure<T: Into<usize>>(&mut self, index: T, upvals: &[Upvalue]) -> RunResult {
         if let Value::Fun(f) = self.read_constant(index).clone() {
             let mut upvalues = Vec::new();
             for Upvalue { index, is_local } in upvals {
                 upvalues.push(if *is_local {
                     self.capture_upvalue(self.frame().base + index)
                 } else {
-                    self.frame().upvalues[*index].clone()
+                    self.frame().upvalues[*index]
                 });
             }
 
@@ -460,20 +362,20 @@ impl<'writer, 'source> VM<'writer> {
             UpvalueRef::Live(s) if *s == slot => true,
             _ => false,
         }) {
-            r.clone()
+            *r
         } else {
             let allocated = self.alloc(UpvalueRef::new(slot));
 
-            self.open_upvalues
+            *self
+                .open_upvalues
                 .insert_before(allocated, |u_val| match &**u_val {
                     UpvalueRef::Live(s) if *s < slot => true,
                     _ => false,
                 })
-                .clone()
         }
     }
 
-    fn fetch_upvalue<T: Into<usize>>(&mut self, index: T) -> Result<(), RuntimeError> {
+    fn fetch_upvalue<T: Into<usize>>(&mut self, index: T) -> RunResult {
         match self.frame().get_upvalue(index.into()) {
             Some(u) => match &*u {
                 UpvalueRef::Live(slot) => {
@@ -494,7 +396,7 @@ impl<'writer, 'source> VM<'writer> {
         }
     }
 
-    fn set_upvalue<T: Into<usize>>(&mut self, index: T) -> Result<(), RuntimeError> {
+    fn set_upvalue<T: Into<usize>>(&mut self, index: T) -> RunResult {
         match self.frame().get_upvalue(index.into()) {
             Some(mut u) => match &mut *u {
                 UpvalueRef::Live(slot) => {
@@ -534,10 +436,7 @@ impl<'writer, 'source> VM<'writer> {
         }
     }
 
-    fn get_property<T: Into<usize> + fmt::Display + Copy>(
-        &mut self,
-        index: T,
-    ) -> Result<(), RuntimeError> {
+    fn get_property<T: Into<usize> + fmt::Display + Copy>(&mut self, index: T) -> RunResult {
         match self.stack.pop() {
             None => Err(RuntimeError::StackEmpty),
             Some(Value::Instance(i)) => {
@@ -560,17 +459,17 @@ impl<'writer, 'source> VM<'writer> {
         class: Gc<Class>,
         instance: Gc<Instance>,
         name: T,
-    ) -> Result<(), RuntimeError> {
+    ) -> RunResult {
         if let Some(m) = class.methods.get(name.as_ref()) {
             let (fun, upvalues) = match m {
-                Value::Fun(f) => (f.clone(), Box::new([]) as Box<[_]>),
-                Value::Closure(f, u) => (f.clone(), u.clone()),
+                Value::Fun(f) => (f, Box::new([]) as Box<[_]>),
+                Value::Closure(f, u) => (f, u.clone()),
                 _ => return Err(RuntimeError::ArgumentTypes),
             };
 
             self.stack.push(Value::BoundMethod {
                 recv: instance,
-                fun,
+                fun: *fun,
                 upvalues,
             });
 
@@ -580,10 +479,7 @@ impl<'writer, 'source> VM<'writer> {
         }
     }
 
-    fn set_property<T: Into<usize> + fmt::Display + Copy>(
-        &mut self,
-        index: T,
-    ) -> Result<(), RuntimeError> {
+    fn set_property<T: Into<usize> + fmt::Display + Copy>(&mut self, index: T) -> RunResult {
         let value = self.stack.pop().ok_or(RuntimeError::StackEmpty)?;
 
         match self.stack.pop() {
@@ -599,10 +495,7 @@ impl<'writer, 'source> VM<'writer> {
         }
     }
 
-    fn get_super<T: Into<usize> + fmt::Display + Copy>(
-        &mut self,
-        index: T,
-    ) -> Result<(), RuntimeError> {
+    fn get_super<T: Into<usize> + fmt::Display + Copy>(&mut self, index: T) -> RunResult {
         let (this_val, super_val) = self.pop_pair()?;
 
         if let (Value::Class(super_class), Value::Instance(this)) = (super_val, this_val) {
@@ -613,25 +506,22 @@ impl<'writer, 'source> VM<'writer> {
         }
     }
 
-    fn define_method<T: Into<usize> + fmt::Display + Copy>(
-        &mut self,
-        index: T,
-    ) -> Result<(), RuntimeError> {
+    fn define_method<T: Into<usize> + fmt::Display + Copy>(&mut self, index: T) -> RunResult {
         let value = self.stack.pop().ok_or(RuntimeError::StackEmpty)?;
 
         match self.peek(0)? {
             Value::Class(c) => {
-                let mut c = c.clone();
+                let mut c = *c;
                 let var_str = self.read_string(index);
                 c.methods
-                    .insert(var_str.to_string().into_boxed_str(), value.clone());
+                    .insert(var_str.to_string().into_boxed_str(), value);
                 Ok(())
             }
             _ => Err(RuntimeError::ArgumentTypes),
         }
     }
 
-    fn invoke<T: AsRef<str>>(&mut self, method: T, arg_count: u8) -> Result<(), RuntimeError> {
+    fn invoke<T: AsRef<str>>(&mut self, method: T, arg_count: u8) -> RunResult {
         if let Value::Instance(recv) = self.peek(arg_count.into())? {
             // check for fields, they shadow class methods
             if let Some(field) = recv.fields.get(method.as_ref()).cloned() {
@@ -639,7 +529,7 @@ impl<'writer, 'source> VM<'writer> {
                 self.stack[l - usize::from(arg_count) - 1] = field;
                 self.call_value_from_stack(arg_count)
             } else {
-                let class = recv.class.clone();
+                let class = recv.class;
                 self.invoke_from_class(class, method.as_ref(), arg_count)
             }
         } else {
@@ -647,12 +537,7 @@ impl<'writer, 'source> VM<'writer> {
         }
     }
 
-    fn invoke_from_class(
-        &mut self,
-        class: Gc<Class>,
-        method: &str,
-        arg_count: u8,
-    ) -> Result<(), RuntimeError> {
+    fn invoke_from_class(&mut self, class: Gc<Class>, method: &str, arg_count: u8) -> RunResult {
         if let Some(m) = class.methods.get(method) {
             self.call_value(m.clone(), arg_count)
         } else {
@@ -660,12 +545,12 @@ impl<'writer, 'source> VM<'writer> {
         }
     }
 
-    fn call_value(&mut self, value: Value, arg_count: u8) -> Result<(), RuntimeError> {
+    fn call_value(&mut self, value: Value, arg_count: u8) -> RunResult {
         match value {
             Value::Closure(f, u) => self.call(f, u, arg_count),
             Value::Fun(f) => self.call(f, Box::new([]), arg_count),
             Value::Class(c) => {
-                let cls = c.clone();
+                let cls = c;
 
                 let val = Value::Instance(self.alloc(Instance::new(cls)));
                 let l = self.stack.len();
@@ -674,11 +559,11 @@ impl<'writer, 'source> VM<'writer> {
                 if let Some(init) = c.methods.get("init") {
                     match init {
                         Value::Fun(f) => {
-                            let f = f.clone();
+                            let f = *f;
                             self.call(f, Box::new([]), arg_count)
                         }
                         Value::Closure(f, u) => {
-                            let (f, u) = (f.clone(), u.clone());
+                            let (f, u) = (*f, u.clone());
                             self.call(f, u, arg_count)
                         }
                         _ => Err(RuntimeError::ArgumentTypes),
@@ -717,7 +602,7 @@ impl<'writer, 'source> VM<'writer> {
         }
     }
 
-    fn call_value_from_stack(&mut self, arg_count: u8) -> Result<(), RuntimeError> {
+    pub(super) fn call_value_from_stack(&mut self, arg_count: u8) -> RunResult {
         let val = self.peek(arg_count.into())?.clone();
         self.call_value(val, arg_count)
     }
@@ -727,7 +612,7 @@ impl<'writer, 'source> VM<'writer> {
         callee: Gc<Fun>,
         upvalues: Box<[Gc<UpvalueRef>]>,
         arg_count: u8,
-    ) -> Result<(), RuntimeError> {
+    ) -> RunResult {
         if arg_count == callee.arity {
             self.frames.push(CallFrame {
                 func: callee,
@@ -743,185 +628,5 @@ impl<'writer, 'source> VM<'writer> {
         } else {
             Err(RuntimeError::ArityMismatch(callee.arity, arg_count))
         }
-    }
-
-    /// Define a global variable inside the runtime.
-    ///
-    /// Since globals are late bound in Lox, functions that reference the provided name will see
-    /// the provided value, **even if they were declared in the runtime _before_ calling this
-    /// method**.
-    pub fn define_global<T: ToString>(&mut self, name: T, value: Value) {
-        self.globals
-            .insert(name.to_string().into_boxed_str(), value);
-    }
-
-    /// Set the stream for program output. Any stream that implements [`Write`] is supported. Pass
-    /// in `None` to use the default value ([`Stdout`]).
-    ///
-    /// ### Example
-    ///
-    /// ```
-    /// # use lox_lang::VM;
-    /// let (mut out_buffer_1, mut out_buffer_2) = (Vec::new(), Vec::new());
-    /// let mut vm = VM::default();
-    ///
-    /// vm.replace_stream(Some(&mut out_buffer_1));
-    /// vm.interpret("print nil == true;");
-    ///
-    /// // can also change streams on an existing instance
-    /// vm.replace_stream(Some(&mut out_buffer_2));
-    /// vm.interpret("for (var a = 3; a < 12; a = a + 3) print a;");
-    ///
-    /// assert_eq!(std::str::from_utf8(&out_buffer_1).unwrap(), "false\n");
-    /// assert_eq!(std::str::from_utf8(&out_buffer_2).unwrap(), "3\n6\n9\n");
-    /// ```
-    ///
-    /// [`Stdout`]: https://doc.rust-lang.org/std/io/struct.Stdout.html
-    /// [`Write`]: https://doc.rust-lang.org/std/io/trait.Write.html
-    pub fn replace_stream(&mut self, out: Option<&'writer mut dyn Write>) {
-        self.stdout.take();
-        self.stdout = out;
-    }
-
-    fn print(&mut self, args: fmt::Arguments) {
-        if let Some(ref mut out) = self.stdout {
-            out.write_fmt(args).unwrap();
-        } else {
-            print!("{}", args);
-        }
-    }
-
-    fn mark_roots(&mut self) -> Vec<Gc<dyn Any>> {
-        let mut gray_stack = Vec::new();
-
-        // locals and temporaries
-        for el in &self.stack {
-            el.mark(&mut gray_stack);
-        }
-
-        // globals
-        for val in self.globals.values() {
-            val.mark(&mut gray_stack);
-        }
-
-        // call frames
-        for frame in &self.frames {
-            frame.mark(&mut gray_stack);
-        }
-
-        // open upvalues
-        for c in self.open_upvalues.iter() {
-            c.mark();
-            gray_stack.push(c.as_any());
-        }
-
-        // compiler roots
-        for root in &self.compiler_roots {
-            root.mark(&mut gray_stack);
-        }
-
-        gray_stack
-    }
-
-    fn trace_references(&mut self, gray_stack: &mut Vec<Gc<dyn Any>>) {
-        while let Some(top_obj) = gray_stack.pop() {
-            self.blacken(top_obj, gray_stack);
-        }
-    }
-
-    fn blacken(&mut self, obj: Gc<dyn Any>, gray_stack: &mut Vec<Gc<dyn Any>>) {
-        if obj.is_marked() {
-            return;
-        }
-
-        #[cfg(feature = "trace-gc")]
-        log::debug!("{0:p} blacken\t{0:?}", obj);
-
-        if let Some(f) = obj.downcast_ref::<Fun>() {
-            for c in &f.chunk.constants {
-                c.mark(gray_stack);
-            }
-        } else if let Some(u) = obj.downcast_ref::<UpvalueRef>() {
-            if let UpvalueRef::Captured(ref v) = *u {
-                v.mark(gray_stack);
-            }
-        } else if let Some(Class { methods, .. }) = obj.downcast_ref::<Class>() {
-            for method in methods.values() {
-                method.mark(gray_stack);
-            }
-        } else if let Some(Instance { class, fields }) = obj.downcast_ref::<Instance>() {
-            class.mark();
-            gray_stack.push(class.as_any());
-
-            for value in fields.values() {
-                value.mark(gray_stack);
-            }
-        }
-    }
-
-    fn sweep(&mut self) {
-        let to_drop = self.objects.retain(|obj| {
-            if obj.is_marked() {
-                obj.clear_mark();
-                true
-            } else {
-                false
-            }
-        });
-
-        for ptr in to_drop {
-            self.total_allocations -= mem::size_of_val(&*ptr);
-            ptr.free();
-        }
-    }
-
-    fn collect_garbage(&mut self) {
-        #[cfg(feature = "trace-gc")]
-        let before = self.total_allocations;
-
-        #[cfg(feature = "trace-gc")]
-        log::debug!("gc begin :: total allocations {} bytes", before);
-
-        let mut gray_stack = self.mark_roots();
-        self.trace_references(&mut gray_stack);
-        self.sweep();
-
-        // adjust threshold
-        self.next_gc = self.total_allocations * 2;
-
-        #[cfg(feature = "trace-gc")]
-        log::debug!(
-            "gc end   :: collected {} bytes (total was {}, now {}) :: next at {}",
-            before - self.total_allocations,
-            before,
-            self.total_allocations,
-            self.next_gc
-        );
-    }
-
-    fn should_collect(&self) -> bool {
-        cfg!(feature = "stress-test-gc") || self.total_allocations > self.next_gc
-    }
-
-    fn alloc<T: Any>(&mut self, obj: T) -> Gc<T> {
-        if self.should_collect() {
-            self.collect_garbage();
-        }
-
-        let size = mem::size_of::<T>();
-        self.total_allocations += size;
-
-        let ptr = Gc::new(obj);
-        self.objects.push(ptr.as_any());
-
-        #[cfg(feature = "trace-gc")]
-        log::debug!(
-            "{:p} allocate {} bytes for {}",
-            ptr,
-            size,
-            std::any::type_name::<T>()
-        );
-
-        ptr
     }
 }

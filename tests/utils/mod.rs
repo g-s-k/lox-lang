@@ -4,11 +4,16 @@ use simplelog::{ConfigBuilder, LevelFilter, SimpleLogger};
 
 macro_rules! run {
     ($source: literal -> $( $expected: literal ),*) => {{
-        let mut buffer = Vec::new();
+        use std::io::Read;
+
         let mut vm = lox_lang::VM::default();
-        vm.replace_stream(Some(&mut buffer));
+        vm.buffer_output(true);
+
         vm.interpret($source).map_err(|mut v| v.pop().unwrap())?;
-        assert_eq!(String::from_utf8(buffer).unwrap(), concat!($( $expected, "\n" ),*));
+
+        let mut buffer = String::new();
+        vm.read_to_string(&mut buffer).unwrap();
+        assert_eq!(buffer, concat!($( $expected, "\n" ),*));
         Ok(())
     }};
 }

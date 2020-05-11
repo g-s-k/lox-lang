@@ -1,6 +1,6 @@
 use std::fmt;
 
-use super::{Chunk, Upvalue};
+use crate::{Chunk, Upvalue};
 
 #[derive(Clone, Debug)]
 pub(crate) enum Op {

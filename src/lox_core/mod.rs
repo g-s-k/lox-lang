@@ -1,6 +1,12 @@
 use std::{any::Any, cmp, collections::HashMap, error, fmt};
 
-use super::{Chunk, Gc, RuntimeError, UpvalueRef};
+mod chunk;
+mod obj;
+mod ops;
+
+pub(crate) use {chunk::Chunk, obj::Gc, ops::Op};
+
+use super::RuntimeError;
 
 /// Underlying representation of runtime values in Lox.
 #[derive(Clone)]
@@ -10,18 +16,24 @@ pub enum Value {
     Boolean(bool),
     Number(f64),
     r#String(Box<str>),
+
     #[doc(hidden)]
     Fun(Gc<Fun>),
     #[doc(hidden)]
     Closure(Gc<Fun>, Box<[Gc<UpvalueRef>]>),
-    Class(Gc<Class>),
-    Instance(Gc<Instance>),
+    #[doc(hidden)]
     BoundMethod {
         recv: Gc<Instance>,
         fun: Gc<Fun>,
         upvalues: Box<[Gc<UpvalueRef>]>,
     },
+
     NativeFun(NativeFun),
+
+    #[doc(hidden)]
+    Class(Gc<Class>),
+    #[doc(hidden)]
+    Instance(Gc<Instance>),
 }
 
 impl fmt::Display for Value {
@@ -75,6 +87,30 @@ impl cmp::PartialEq for Value {
             (Self::r#String(a), Self::r#String(b)) => a == b,
             _ => false,
         }
+    }
+}
+
+impl From<bool> for Value {
+    fn from(b: bool) -> Self {
+        Self::Boolean(b)
+    }
+}
+
+impl From<f64> for Value {
+    fn from(f: f64) -> Self {
+        Self::Number(f)
+    }
+}
+
+impl From<&str> for Value {
+    fn from(s: &str) -> Self {
+        s.to_string().into()
+    }
+}
+
+impl From<String> for Value {
+    fn from(s: String) -> Self {
+        Self::r#String(s.into_boxed_str())
     }
 }
 
@@ -138,6 +174,38 @@ impl Value {
     }
 }
 
+impl Gc<dyn Any> {
+    pub(crate) fn blacken(self, gray_stack: &mut Vec<Gc<dyn Any>>) {
+        if self.is_marked() {
+            return;
+        }
+
+        #[cfg(feature = "trace-gc")]
+        log::debug!("{0:p} blacken\t{0:?}", self);
+
+        if let Some(f) = self.downcast_ref::<Fun>() {
+            for c in &f.chunk.constants {
+                c.mark(gray_stack);
+            }
+        } else if let Some(u) = self.downcast_ref::<UpvalueRef>() {
+            if let UpvalueRef::Captured(ref v) = *u {
+                v.mark(gray_stack);
+            }
+        } else if let Some(Class { methods, .. }) = self.downcast_ref::<Class>() {
+            for method in methods.values() {
+                method.mark(gray_stack);
+            }
+        } else if let Some(Instance { class, fields }) = self.downcast_ref::<Instance>() {
+            class.mark();
+            gray_stack.push(class.as_any());
+
+            for value in fields.values() {
+                value.mark(gray_stack);
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Fun {
     pub(crate) name: Box<str>,
@@ -162,13 +230,38 @@ impl Fun {
 }
 
 #[derive(Clone, Debug)]
+pub enum UpvalueRef {
+    Live(usize),
+    Captured(Box<Value>),
+}
+
+impl UpvalueRef {
+    pub(crate) fn new(slot: usize) -> Self {
+        Self::Live(slot)
+    }
+
+    pub(crate) fn close(&mut self, ptr: Value) {
+        *self = Self::Captured(Box::new(ptr));
+    }
+}
+
+impl fmt::Display for UpvalueRef {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Self::Live(idx) => write!(f, "at stack index {}", idx),
+            Self::Captured(ptr) => write!(f, "at address {:p}", ptr),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct Class {
     pub(crate) name: Box<str>,
     pub(crate) methods: HashMap<Box<str>, Value>,
 }
 
 impl Class {
-    pub(crate) fn new<T: ToString>(name: T) -> Self {
+    pub(crate) fn new<T: ToString>(name: &T) -> Self {
         Self {
             name: name.to_string().into_boxed_str(),
             methods: HashMap::new(),
@@ -202,7 +295,7 @@ impl Instance {
 /// ## Example
 ///
 /// ```
-/// # use {std::{error::Error, fmt}, lox_lang::{Value, VM}};
+/// # use {std::{error::Error, fmt, io::Read}, lox_lang::{Value, VM}};
 /// # #[derive(Debug)]
 /// # struct MyError;
 /// # impl fmt::Display for MyError {
@@ -215,14 +308,13 @@ impl Instance {
 /// fn replace(args: &[Value]) -> Result<Value, Box<dyn Error>> {
 ///     match args {
 ///         [Value::r#String(text), Value::r#String(pat), Value::r#String(rep)] =>
-///             Ok(Value::r#String(text.replace(pat.as_ref(), rep).into())),
+///             Ok(text.replace(pat.as_ref(), rep).into()),
 ///         _ => Err(Box::new(MyError)),
 ///     }
 /// }
 ///
-/// let mut output = Vec::new();
 /// let mut vm = VM::default();
-/// vm.replace_stream(Some(&mut output));
+/// vm.buffer_output(true);
 /// vm.define_global("replace", Value::NativeFun(replace));
 ///
 /// vm.interpret(r#"
@@ -230,9 +322,8 @@ impl Instance {
 ///     print replace(proverb, "new", "old");
 /// "#);
 ///
-/// assert_eq!(
-///     String::from_utf8(output).unwrap(),
-///     "what is old becomes old again\n"
-/// );
+/// let mut output = String::new();
+/// vm.read_to_string(&mut output).unwrap();
+/// assert_eq!(output, "what is old becomes old again\n");
 /// ```
 pub type NativeFun = fn(args: &[Value]) -> Result<Value, Box<dyn error::Error>>;

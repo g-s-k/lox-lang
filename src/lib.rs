@@ -30,25 +30,17 @@
 
 use std::{convert::From, error, fmt};
 
-mod chunk;
 mod compiler;
-mod list;
-mod obj;
-mod ops;
-mod runtime;
-mod value;
+mod lox_core;
+mod vm;
 
-pub use runtime::vm::VM;
-pub use value::{NativeFun, Value};
+pub use lox_core::{NativeFun, Value};
+pub use vm::VM;
 
 use {
-    chunk::Chunk,
     compiler::{CompileError, CompileErrorType, Compiler, Upvalue},
-    list::List,
-    obj::Gc,
-    ops::Op,
-    runtime::{RuntimeError, UpvalueRef},
-    value::{Class, Fun, Instance},
+    lox_core::{Chunk, Class, Fun, Gc, Instance, Op, UpvalueRef},
+    vm::RuntimeError,
 };
 
 /// Compilation and runtime errors in the Lox VM.

@@ -1,6 +1,9 @@
 use std::{convert::TryInto, fmt};
 
-use super::{CompileErrorType, Op, Value};
+use {
+    super::{Op, Value},
+    crate::CompileErrorType,
+};
 
 #[derive(Clone, Debug)]
 struct LineRecord {

@@ -11,7 +11,7 @@ struct ObjBox<T: ?Sized> {
     value: T,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Gc<T: ?Sized>(*mut ObjBox<T>);
 
 impl<T> Gc<T> {
@@ -73,6 +73,14 @@ impl<T: Any> Gc<T> {
         Gc(self.0 as *mut ObjBox<dyn Any>)
     }
 }
+
+impl<T: ?Sized> Clone for Gc<T> {
+    fn clone(&self) -> Self {
+        Self(self.0)
+    }
+}
+
+impl<T: ?Sized> Copy for Gc<T> {}
 
 impl<T: ?Sized> Deref for Gc<T> {
     type Target = T;
