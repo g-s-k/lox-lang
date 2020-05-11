@@ -12,7 +12,7 @@ impl VM {
     /// Pass `true` to this method to buffer print output internally. This output can then be
     /// accessed through this struct's [`Read`] implementation.
     ///
-    /// Pass `false` (the default mode) to sink all program output directly to [`Stdout`];
+    /// Pass `false` (the default mode) to sink all program output directly to [`Stdout`].
     ///
     /// ### Example
     ///
@@ -28,10 +28,10 @@ impl VM {
     /// vm.read_to_string(&mut buffer).unwrap();
     /// assert_eq!(buffer, "false\n");
     ///
-    /// buffer.clear();
     /// vm.interpret("for (var a = 3; a < 12; a = a + 3) print a;");
-    /// vm.read_to_string(&mut buffer).unwrap();
     ///
+    /// buffer.clear();
+    /// vm.read_to_string(&mut buffer).unwrap();
     /// assert_eq!(buffer, "3\n6\n9\n");
     /// ```
     ///
