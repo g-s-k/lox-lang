@@ -1,11 +1,4 @@
-use std::{
-    any::{self, Any},
-    collections::HashMap,
-    fmt,
-    io::Write,
-    mem,
-    ops::Deref,
-};
+use std::{any::Any, collections::HashMap, fmt, io::Write, mem};
 
 use {
     super::{CallFrame, RuntimeError, UpvalueRef},
@@ -384,7 +377,7 @@ impl<'writer, 'source> VM<'writer> {
     }
 
     fn fetch_local<T: Into<usize>>(&mut self, index: T) -> Result<(), RuntimeError> {
-        let base_ptr = usize::from(self.frame().base);
+        let base_ptr = self.frame().base;
 
         let index = index.into();
         if let Some(val) = self.stack.get(index + base_ptr).cloned() {
@@ -819,7 +812,7 @@ impl<'writer, 'source> VM<'writer> {
         // open upvalues
         for c in self.open_upvalues.iter() {
             c.mark();
-            gray_stack.push(c.clone().into());
+            gray_stack.push(c.as_any());
         }
 
         // compiler roots
@@ -858,7 +851,7 @@ impl<'writer, 'source> VM<'writer> {
             }
         } else if let Some(Instance { class, fields }) = obj.downcast_ref::<Instance>() {
             class.mark();
-            gray_stack.push(class.clone().into());
+            gray_stack.push(class.as_any());
 
             for value in fields.values() {
                 value.mark(gray_stack);
@@ -918,24 +911,17 @@ impl<'writer, 'source> VM<'writer> {
         let size = mem::size_of::<T>();
         self.total_allocations += size;
 
-        let el_ptr = self.objects.push(Gc::new(Box::new(obj)));
+        let ptr = Gc::new(obj);
+        self.objects.push(ptr.as_any());
 
-        if let Some(obj_ref) = el_ptr.downcast() {
-            #[cfg(feature = "trace-gc")]
-            log::debug!(
-                "{:p} allocate {} bytes for {}",
-                obj_ref,
-                size,
-                any::type_name::<T>()
-            );
+        #[cfg(feature = "trace-gc")]
+        log::debug!(
+            "{:p} allocate {} bytes for {}",
+            ptr,
+            size,
+            std::any::type_name::<T>()
+        );
 
-            obj_ref
-        } else {
-            unreachable!(
-                "Pushed a value of type {}, but was unable to coerce a reference with that type from {:?}.",
-                any::type_name::<T>(),
-                el_ptr.deref()
-            );
-        }
+        ptr
     }
 }

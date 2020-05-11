@@ -98,24 +98,24 @@ impl Value {
         match self {
             Self::Fun(f) => {
                 f.mark();
-                grays.push(f.clone().into());
+                grays.push(f.as_any());
             }
             Self::Closure(f, u) => {
                 f.mark();
-                grays.push(f.clone().into());
+                grays.push(f.as_any());
 
                 for u_val in u.iter() {
                     u_val.mark();
-                    grays.push(u_val.clone().into());
+                    grays.push(u_val.as_any());
                 }
             }
             Self::Class(c) => {
                 c.mark();
-                grays.push(c.clone().into());
+                grays.push(c.as_any());
             }
             Self::Instance(i) => {
                 i.mark();
-                grays.push(i.clone().into());
+                grays.push(i.as_any());
             }
             Self::BoundMethod {
                 recv,
@@ -123,14 +123,14 @@ impl Value {
                 upvalues,
             } => {
                 recv.mark();
-                grays.push(recv.clone().into());
+                grays.push(recv.as_any());
 
                 fun.mark();
-                grays.push(fun.clone().into());
+                grays.push(fun.as_any());
 
                 for u_val in upvalues.iter() {
                     u_val.mark();
-                    grays.push(u_val.clone().into());
+                    grays.push(u_val.as_any());
                 }
             }
             _ => (),

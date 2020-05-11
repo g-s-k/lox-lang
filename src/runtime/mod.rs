@@ -102,11 +102,11 @@ impl CallFrame {
 
     fn mark(&self, grays: &mut Vec<Gc<dyn Any>>) {
         self.func.mark();
-        grays.push(self.func.clone().into());
+        grays.push(self.func.as_any());
 
         for u_val in self.upvalues.iter() {
             u_val.mark();
-            grays.push(u_val.clone().into());
+            grays.push(u_val.as_any());
         }
     }
 }
