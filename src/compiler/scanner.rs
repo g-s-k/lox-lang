@@ -149,7 +149,6 @@ impl<'a> Scanner<'a> {
                     self.line += 1;
 
                     if in_comment {
-                        self.next();
                         in_comment = false;
                     }
                 }
