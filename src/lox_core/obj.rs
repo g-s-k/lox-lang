@@ -67,7 +67,7 @@ impl<T: ?Sized> Gc<T> {
 }
 
 impl<T: Any> Gc<T> {
-    pub(crate) fn as_any(&self) -> Gc<dyn Any> {
+    pub(crate) fn as_any(self) -> Gc<dyn Any> {
         Gc(self.0 as *mut ObjBox<dyn Any>)
     }
 }

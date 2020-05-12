@@ -32,7 +32,7 @@ pub(super) struct FunWrapper<'compile> {
 }
 
 impl<'compile> FunWrapper<'compile> {
-    pub(super) fn new<T: ToString>(name: T, r#type: FunType) -> Self {
+    pub(super) fn new<T: ToString>(name: &T, r#type: FunType) -> Self {
         Self {
             enclosing: None,
             inner: Fun::new(name, 0),

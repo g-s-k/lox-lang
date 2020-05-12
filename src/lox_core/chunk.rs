@@ -20,7 +20,7 @@ pub(crate) struct Chunk {
 }
 
 impl Chunk {
-    pub fn new<T: ToString>(name: T) -> Self {
+    pub fn new<T: ToString>(name: &T) -> Self {
         Self {
             name: name.to_string(),
             constants: Vec::new(),

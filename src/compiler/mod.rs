@@ -148,7 +148,7 @@ impl<'compile> Compiler<'compile> {
                 panic_mode: false,
             },
             errors: Vec::new(),
-            fun: Box::new(FunWrapper::new("script", FunType::Script)),
+            fun: Box::new(FunWrapper::new(&"script", FunType::Script)),
             class: None,
             alloc,
         };
@@ -401,7 +401,7 @@ impl<'compile> Compiler<'compile> {
             _ => unreachable!("cannot compile a function without a name"),
         };
         let old_fun_wrapper =
-            mem::replace(&mut self.fun, Box::new(FunWrapper::new(fun_name, r#type)));
+            mem::replace(&mut self.fun, Box::new(FunWrapper::new(&fun_name, r#type)));
         self.fun.enclosing = Some(old_fun_wrapper);
 
         self.begin_scope();

@@ -52,42 +52,42 @@ pub(crate) enum CompileErrorType {
 
 impl fmt::Display for CompileErrorType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        use CompileErrorType::*;
-
         match self {
-            UnexpectedChar(c) => write!(f, "unexpected character '{}'", c),
-            UnterminatedString => write!(f, "unterminated string"),
-            MissingLeftParen(location) => write!(f, "expected '(' {}", location),
-            MissingRightParen(location) => write!(f, "expected ')' {}", location),
-            MissingLeftBrace(location) => write!(f, "expected '{{' {}", location),
-            MissingRightBrace(location) => write!(f, "expected '}}' {}", location),
-            MissingDot(location) => write!(f, "expected '.' {}", location),
-            MissingPrefixExpr => write!(f, "expected expression"),
-            MissingSemi => write!(f, "expected ';' after statement"),
-            MissingVarName => write!(f, "expect variable name"),
-            MissingClassName => write!(f, "expect class name"),
-            MissingPropertyName => write!(f, "expect property name after '.'"),
-            MissingMethodName => write!(f, "expect method name"),
-            InvalidThis => write!(f, "cannot use 'this' outside of a class"),
-            InvalidSuper(location) => write!(f, "cannot use 'super' {}", location),
-            ReturnFromInit => write!(f, "cannot return a value from 'init' method"),
-            MissingSuperclass => write!(f, "expect superclass name after '<'"),
-            InheritFromSelf => write!(f, "a class cannot inherit from itself"),
-            MissingFunName => write!(f, "expect function name"),
-            MissingParamName => write!(f, "expect parameter name"),
-            TooManyParams => write!(f, "cannot exceed 255 parameters"),
-            DuplicateLocal(who) => write!(f, "variable `{}` already declared in this scope", who),
-            ReadBeforeDefined(who) => {
+            Self::UnexpectedChar(c) => write!(f, "unexpected character '{}'", c),
+            Self::UnterminatedString => write!(f, "unterminated string"),
+            Self::MissingLeftParen(location) => write!(f, "expected '(' {}", location),
+            Self::MissingRightParen(location) => write!(f, "expected ')' {}", location),
+            Self::MissingLeftBrace(location) => write!(f, "expected '{{' {}", location),
+            Self::MissingRightBrace(location) => write!(f, "expected '}}' {}", location),
+            Self::MissingDot(location) => write!(f, "expected '.' {}", location),
+            Self::MissingPrefixExpr => write!(f, "expected expression"),
+            Self::MissingSemi => write!(f, "expected ';' after statement"),
+            Self::MissingVarName => write!(f, "expect variable name"),
+            Self::MissingClassName => write!(f, "expect class name"),
+            Self::MissingPropertyName => write!(f, "expect property name after '.'"),
+            Self::MissingMethodName => write!(f, "expect method name"),
+            Self::InvalidThis => write!(f, "cannot use 'this' outside of a class"),
+            Self::InvalidSuper(location) => write!(f, "cannot use 'super' {}", location),
+            Self::ReturnFromInit => write!(f, "cannot return a value from 'init' method"),
+            Self::MissingSuperclass => write!(f, "expect superclass name after '<'"),
+            Self::InheritFromSelf => write!(f, "a class cannot inherit from itself"),
+            Self::MissingFunName => write!(f, "expect function name"),
+            Self::MissingParamName => write!(f, "expect parameter name"),
+            Self::TooManyParams => write!(f, "cannot exceed 255 parameters"),
+            Self::DuplicateLocal(who) => {
+                write!(f, "variable `{}` already declared in this scope", who)
+            }
+            Self::ReadBeforeDefined(who) => {
                 write!(f, "tried to use variable `{}` in its own initializer", who)
             }
-            JumpTooLarge(distance) => write!(
+            Self::JumpTooLarge(distance) => write!(
                 f,
                 "jump distance {:x} is too large to fit in a `u16` (max value {:x})",
                 distance,
                 std::u16::MAX
             ),
-            TopLevelReturn => write!(f, "return statement outside a function body"),
-            ExpectedEOF => write!(f, "expected end of input"),
+            Self::TopLevelReturn => write!(f, "return statement outside a function body"),
+            Self::ExpectedEOF => write!(f, "expected end of input"),
         }
     }
 }

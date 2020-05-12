@@ -41,11 +41,11 @@ impl fmt::Display for Value {
             Self::Boolean(b) => write!(f, "{}", b),
             Self::Number(v) => write!(f, "{}", v),
             Self::r#String(s) => write!(f, "{}", s),
-            Self::Fun(fun) => write!(f, "{}", **fun),
-            Self::Closure(fun, _) => write!(f, "{}", **fun),
+            Self::Fun(fun) | Self::Closure(fun, _) | Self::BoundMethod { fun, .. } => {
+                write!(f, "{}", **fun)
+            }
             Self::Class(c) => write!(f, "{}", **c),
             Self::Instance(i) => write!(f, "{} instance", *i.class),
-            Self::BoundMethod { fun, .. } => write!(f, "{}", **fun),
             Self::NativeFun(_) => write!(f, "#<native fun>"),
         }
     }
@@ -222,7 +222,7 @@ impl fmt::Display for Fun {
 }
 
 impl Fun {
-    pub(crate) fn new<T: ToString>(name: T, arity: u8) -> Self {
+    pub(crate) fn new<T: ToString>(name: &T, arity: u8) -> Self {
         Self {
             arity,
             name: name.to_string().into_boxed_str(),
