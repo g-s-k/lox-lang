@@ -3,7 +3,6 @@ use std::{
     io::{self, BufRead, Write},
     path::{Path, PathBuf},
     process,
-    time::Instant,
 };
 
 #[global_allocator]
@@ -11,7 +10,7 @@ static GLOBAL: jemallocator::Jemalloc = jemallocator::Jemalloc;
 
 use {
     clap::Clap,
-    lox_lang::{Error, ErrorCategory, Value, VM},
+    lox_lang::{Error, ErrorCategory, VM},
     simplelog::{ConfigBuilder, LevelFilter, SimpleLogger},
 };
 
@@ -46,7 +45,7 @@ fn main() {
 }
 
 fn repl() {
-    let mut vm = vm_with_global();
+    let mut vm = vm_with_globals();
     let mut buffer = String::new();
     loop {
         buffer.clear();
@@ -78,18 +77,13 @@ fn run_file(path: &Path) -> Result<(), Error> {
         }
     };
 
-    vm_with_global()
+    vm_with_globals()
         .interpret(source)
         .map_err(|mut errs| errs.pop().unwrap())
 }
 
-fn vm_with_global() -> VM {
+fn vm_with_globals() -> VM {
     let mut vm = VM::default();
-
-    let start_time = Instant::now();
-    let clock_cls = move |_: &[Value]| Ok(start_time.elapsed().as_secs_f64().into());
-    let clock_fun = vm.alloc(Box::new(clock_cls) as lox_lang::NativeFun);
-    vm.define_global("clock", Value::NativeFun(clock_fun));
-
+    vm.add_std_globals();
     vm
 }

@@ -32,6 +32,7 @@ use std::{convert::From, error, fmt};
 
 mod compiler;
 mod lox_core;
+pub mod lox_std;
 mod vm;
 
 pub use lox_core::{NativeFun, Value};
