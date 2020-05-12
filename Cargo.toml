@@ -2,7 +2,7 @@
 name = "lox-lang"
 description = "A Lox language runtime for Rust"
 readme = "./README.md"
-version = "0.0.2"
+version = "0.0.3"
 authors = ["George Kaplan <george@georgekaplan.xyz>"]
 edition = "2018"
 license = "MIT"
