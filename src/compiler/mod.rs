@@ -59,7 +59,7 @@ enum Precedence {
     Primary,
 }
 
-impl<'a, 'b> Precedence {
+impl Precedence {
     fn next(self) -> Self {
         match self {
             Self::None => Self::Assignment,
@@ -299,7 +299,6 @@ impl<'compile> Compiler<'compile> {
 
         self.class = Some(Box::new(ClassWrapper {
             enclosing: self.class.take(),
-            name: class_name.to_string().into_boxed_str(),
             has_superclass: false,
         }));
 
@@ -456,7 +455,7 @@ impl<'compile> Compiler<'compile> {
             let fun_value = (self.alloc)(this_fun.inner);
 
             if this_fun.upvalues.is_empty() {
-                emit!(const self: Constant / ConstantLong, fun_value)
+                emit!(const self: Constant / ConstantLong, fun_value);
             } else {
                 let upvalues = this_fun.upvalues.into_boxed_slice();
                 emit!(const self: Closure / ClosureLong, fun_value, upvalues);
@@ -831,7 +830,7 @@ impl<'compile> Compiler<'compile> {
     fn number(&mut self, _: bool) {
         if let Some(Ok(token)) = &self.parser.previous {
             if let Ok(v) = token.text.parse() {
-                emit!(const self: Constant / ConstantLong, Value::Number(v))
+                emit!(const self: Constant / ConstantLong, Value::Number(v));
             }
         }
     }
@@ -885,12 +884,12 @@ impl<'compile> Compiler<'compile> {
             return;
         };
 
-        emit!(const self: Constant / ConstantLong, Value::r#String(text_without_quotes))
+        emit!(const self: Constant / ConstantLong, Value::r#String(text_without_quotes));
     }
 
     fn variable(&mut self, can_assign: bool) {
         let token_text = if let Some(Ok(Token { text, .. })) = &self.parser.previous {
-            (&**text).clone()
+            <&str>::clone(text)
         } else {
             unreachable!();
         };

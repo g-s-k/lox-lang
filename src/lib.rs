@@ -54,11 +54,13 @@ pub struct Error {
 
 impl Error {
     /// Which type of error was encountered
+    #[must_use]
     pub fn category(&self) -> ErrorCategory {
         self.category
     }
 
     /// The line in the Lox source code where the error occurred
+    #[must_use]
     pub fn line(&self) -> usize {
         self.line
     }

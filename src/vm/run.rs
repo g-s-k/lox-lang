@@ -358,20 +358,18 @@ impl super::VM {
     // possible TODO: double iteration here. not sure if it's worth the custom code to do it in one
     // iteration, given that the list is almost always empty or very short
     fn capture_upvalue(&mut self, slot: usize) -> Gc<UpvalueRef> {
-        if let Some(r) = self.open_upvalues.find(|u_val| match &**u_val {
-            UpvalueRef::Live(s) if *s == slot => true,
-            _ => false,
-        }) {
+        if let Some(r) = self
+            .open_upvalues
+            .find(|u_val| matches!(&**u_val,  UpvalueRef::Live(s) if *s == slot))
+        {
             *r
         } else {
             let allocated = self.alloc(UpvalueRef::new(slot));
 
-            *self
-                .open_upvalues
-                .insert_before(allocated, |u_val| match &**u_val {
-                    UpvalueRef::Live(s) if *s < slot => true,
-                    _ => false,
-                })
+            *self.open_upvalues.insert_before(
+                allocated,
+                |u_val| matches!(&**u_val, UpvalueRef::Live(s) if *s < slot),
+            )
         }
     }
 
@@ -447,7 +445,7 @@ impl super::VM {
                     Ok(())
                 } else {
                     let var_string = var_str.to_string();
-                    self.bind_method(i.class.clone(), i, var_string)
+                    self.bind_method(i.class, i, var_string)
                 }
             }
             Some(_) => Err(RuntimeError::ArgumentTypes),

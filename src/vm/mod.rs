@@ -1,4 +1,4 @@
-use std::{any::Any, collections::HashMap};
+use std::{any::Any, collections::HashMap, fmt::Write};
 
 mod errors;
 mod frame;
@@ -83,7 +83,7 @@ impl<'source> VM {
         self.stack.push(fun);
         self.compiler_roots.clear();
 
-        let _ = self.call_value_from_stack(0);
+        let _value = self.call_value_from_stack(0);
 
         self.run().map_err(|err| {
             let mut line_no = None;
@@ -97,7 +97,7 @@ impl<'source> VM {
                     line_no = Some(line);
                 }
 
-                backtrace += &format!("\n=>> line {} in `{}`", line, function);
+                let _shouldnt_fail = write!(backtrace, "\n=>> line {} in `{}`", line, function);
             }
 
             log::error!("{}", backtrace);

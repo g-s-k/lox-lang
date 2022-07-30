@@ -9,12 +9,12 @@ use std::{
 static GLOBAL: jemallocator::Jemalloc = jemallocator::Jemalloc;
 
 use {
-    clap::Clap,
+    clap::Parser,
     lox_lang::{Error, ErrorCategory, VM},
     simplelog::{ConfigBuilder, LevelFilter, SimpleLogger},
 };
 
-#[derive(Clap)]
+#[derive(Parser)]
 struct Params {
     script: Option<PathBuf>,
 }

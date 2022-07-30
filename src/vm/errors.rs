@@ -8,8 +8,6 @@ pub(crate) enum RuntimeError {
     UndefinedGlobal(String),
     NotCallable,
     ArityMismatch(u8, u8),
-    CallStackOverflow,
-    ValueStackOverflow,
     UndefinedProperty(String),
     NativeFunError(Box<dyn error::Error>),
 }
@@ -40,8 +38,6 @@ impl fmt::Display for RuntimeError {
             Self::ArityMismatch(expected, got) => {
                 write!(f, "expected {} arguments but got {}", expected, got)
             }
-            Self::CallStackOverflow => write!(f, "call stack overflowed"),
-            Self::ValueStackOverflow => write!(f, "too many temporaries and locals on the stack"),
             Self::UndefinedProperty(name) => write!(
                 f,
                 "tried to access undefined property `{}` on instance",

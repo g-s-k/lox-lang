@@ -161,9 +161,9 @@ pub fn shell(args: &[Value]) -> Result<Value, Box<dyn Error>> {
     match args {
         [Value::r#String(cmd)] => {
             let output = if cfg!(target_os = "windows") {
-                Command::new("cmd").args(&["/C", &cmd]).output()?
+                Command::new("cmd").args(&["/C", cmd]).output()?
             } else {
-                Command::new("sh").args(&["-c", &cmd]).output()?
+                Command::new("sh").args(&["-c", cmd]).output()?
             };
 
             Ok(String::from_utf8_lossy(&output.stdout).as_ref().into())
@@ -183,6 +183,10 @@ pub fn shell(args: &[Value]) -> Result<Value, Box<dyn Error>> {
 /// If the requested variable does not exist, `nil` is returned. If the variable's value contains
 /// invalid Unicode, those characters will be replaced with the Unicode replacement character
 /// (`U+FFFD`).
+///
+/// # Errors
+///
+/// Returns an error if no variable name is provided.
 pub fn environment_var(args: &[Value]) -> Result<Value, Box<dyn Error>> {
     match args {
         [Value::r#String(name)] => {
@@ -200,6 +204,10 @@ pub fn environment_var(args: &[Value]) -> Result<Value, Box<dyn Error>> {
 }
 
 /// Set the value of an environment variable.
+///
+/// # Errors
+///
+/// Returns an error if either variable name or value is omitted.
 pub fn set_environment_var(args: &[Value]) -> Result<Value, Box<dyn Error>> {
     match args {
         [Value::r#String(name), Value::r#String(value)] => {

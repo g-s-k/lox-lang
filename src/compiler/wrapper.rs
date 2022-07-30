@@ -99,6 +99,5 @@ impl<'compile> FunWrapper<'compile> {
 #[derive(Debug)]
 pub(super) struct ClassWrapper {
     pub(super) enclosing: Option<Box<Self>>,
-    pub(super) name: Box<str>,
     pub(super) has_superclass: bool,
 }

@@ -200,13 +200,7 @@ impl<'a> Scanner<'a> {
     }
 
     fn current_is_identifier_token(&self) -> bool {
-        if let Some((_, 'A'..='Z')) | Some((_, 'a'..='z')) | Some((_, '_')) | Some((_, '0'..='9')) =
-            self.current
-        {
-            true
-        } else {
-            false
-        }
+        matches!(self.current, Some((_, 'A'..='Z' | 'a'..='z' | '_' | '0'..='9'))) 
     }
 
     fn identifier(&mut self, first_char: char) -> TokenType {

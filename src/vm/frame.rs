@@ -16,7 +16,7 @@ impl CallFrame {
     }
 
     pub(crate) fn get_upvalue(&self, index: usize) -> Option<Gc<UpvalueRef>> {
-        self.upvalues.get(index).cloned()
+        self.upvalues.get(index).copied()
     }
 
     pub(crate) fn mark(&self, grays: &mut Vec<Gc<dyn Any>>) {

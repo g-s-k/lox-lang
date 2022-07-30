@@ -110,7 +110,7 @@ impl Chunk {
         };
 
         match self.code.get_mut(index) {
-            Some(Op::Jump(ref mut old)) | Some(Op::JumpIfFalse(ref mut old)) => *old = distance,
+            Some(Op::Jump(ref mut old) | Op::JumpIfFalse(ref mut old)) => *old = distance,
             other => unreachable!(
                 "attempted to patch jump instruction with wrong index ({:05x} => {:?})",
                 index, other,

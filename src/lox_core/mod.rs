@@ -114,10 +114,7 @@ impl From<String> for Value {
 
 impl Value {
     pub(crate) fn is_falsey(&self) -> bool {
-        match self {
-            Self::Nil | Self::Boolean(false) => true,
-            _ => false,
-        }
+        matches!(self, Self::Nil | Self::Boolean(false))
     }
 
     pub(crate) fn negate(self) -> Result<Value, RuntimeError> {
